@@ -6,9 +6,10 @@ interface ModalProps {
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  maxWidth?: string;
 }
 
-export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }) => {
+export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, maxWidth = 'max-w-md' }) => {
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -22,15 +23,15 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/20 backdrop-blur-sm transition-opacity" onClick={onClose} />
-      
-      <div className="relative bg-surface w-full max-w-md rounded-[28px] shadow-2xl overflow-hidden animate-enter scale-100 transform border border-border">
-        <div className="flex justify-between items-center px-6 pt-6 pb-2">
+
+      <div className={`relative bg-surface w-full ${maxWidth} rounded-[28px] shadow-2xl overflow-hidden animate-enter scale-100 transform border border-border flex flex-col max-h-[85vh]`}>
+        <div className="flex justify-between items-center px-6 pt-6 pb-2 shrink-0">
           <h2 className="text-xl font-display font-bold text-text">{title}</h2>
           <button onClick={onClose} className="bg-surface-secondary p-1.5 rounded-full text-secondary hover:text-text transition-colors">
             <X size={18} />
           </button>
         </div>
-        <div className="p-6">
+        <div className="p-6 overflow-y-auto">
           {children}
         </div>
       </div>

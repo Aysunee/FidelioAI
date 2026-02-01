@@ -1,0 +1,85 @@
+[
+  {
+    "id": "user_1769111087991_m7kbgd84k",
+    "email": "admin@fidelio.ai",
+    "name": "Test Admin",
+    "role": "admin",
+    "status": "active",
+    "createdAt": 1769111087991,
+    "updatedAt": 1769111087991,
+    "permissions": [
+      "view_dashboard",
+      "manage_users",
+      "manage_settings"
+    ],
+    "lastLogin": null
+  },
+  {
+    "id": "user_1769113196911_rvvb74vnr",
+    "email": "test@fidelio.ai",
+    "name": "Test User",
+    "username": "testuser",
+    "password": "test123",
+    "role": "admin",
+    "status": "active",
+    "createdAt": 1769113196911,
+    "updatedAt": 1769113196911,
+    "permissions": [
+      "view_dashboard",
+      "manage_users"
+    ],
+    "lastLogin": 1769116357049
+  },
+  {
+    "id": "user_1769116012101_tqqlr2dto",
+    "email": "mertaysune@hotmail.com",
+    "name": "mert",
+    "username": "fidelio",
+    "password": "fiddelio",
+    "role": "admin",
+    "status": "active",
+    "createdAt": 1769116012101,
+    "updatedAt": 1769116012101,
+    "permissions": [
+      "view_dashboard",
+      "manage_trades",
+      "view_analytics",
+      "manage_settings"
+    ],
+    "lastLogin": null
+  },
+  {
+    "id": "user_1769116068548_p6z8exibe",
+    "email": "ertan@gmail.com",
+    "name": "Ertan Demirlenk",
+    "username": "ertandemirlenk",
+    "password": "12345",
+    "role": "trader",
+    "status": "active",
+    "createdAt": 1769116068548,
+    "updatedAt": 1769239863065,
+    "permissions": [
+      "view_dashboard",
+      "manage_trades",
+      "view_analytics",
+      "manage_settings"
+    ],
+    "lastLogin": 1769292034057
+  },
+  {
+    "id": "user_1769117380539_rn953672z",
+    "email": "local@admin.com",
+    "name": "Local Admin",
+    "username": "admin",
+    "password": "admin",
+    "role": "admin",
+    "status": "active",
+    "createdAt": 1769117380539,
+    "updatedAt": 1769117380539,
+    "permissions": [
+      "view_dashboard",
+      "manage_users"
+    ],
+    "lastLogin": 1769939850790
+  }
+]

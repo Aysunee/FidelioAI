@@ -1,0 +1,222 @@
+export type Language = 'en' | 'tr';
+
+export const translations = {
+    en: {
+        // Navigation
+        markets: 'Markets',
+        spotSniper: 'Spot Sniper',
+        derivatives: 'Derivatives',
+        radar: 'Radar',
+        portfolio: 'Portfolio',
+        signals: 'Signals',
+        nexus: 'Nexus',
+        fidelioAi: 'Fidelio.ai',
+        journal: 'Journal',
+        database: 'Database',
+        lab: 'Lab',
+
+        // Header/Settings
+        preferences: 'Preferences',
+        language: 'Language',
+        turkish: 'Turkish',
+        english: 'English',
+        connected: 'Connected',
+        connecting: 'Connecting...',
+        logout: 'Logout',
+
+        // Overview/Sections
+        derivativesOverview: 'Derivatives Overview',
+        derivativesDesc: 'Real-time funding rates and next settlement timers.',
+        marketAnomalyRadar: 'Market Anomaly Radar',
+        radarDesc: 'Real-time scanner for Price/OI divergences, Squeezes, and Decoupling events.',
+        portfolioTracker: 'Portfolio Tracker',
+        portfolioDesc: 'Track assets and log trade history.',
+
+        // Modals
+        scalperShortcuts: 'Scalper Shortcuts',
+        navigation: 'Navigation',
+        actions: 'Actions',
+        close: 'Close',
+
+        // Misc
+        vibrant: 'Vibrant',
+        minimal: 'Minimal',
+        switchVibrant: 'Switch to Vibrant Mode',
+        switchMinimal: 'Switch to Minimal Mode',
+
+        // Landing Page
+        liveIntelligence: 'Live Market Intelligence',
+        tradeWith: 'Trade with',
+        precision: 'Precision',
+        heroDesc: 'Institutional-grade AI signals, real-time anomaly detection, and advanced derivatives analysis—all in one premium interface.',
+        startTrading: 'Start Trading',
+        exploreFeatures: 'Explore Features',
+        marketsTracked: 'Markets Tracked',
+        signalsPerDay: 'Signals Per Day',
+        aiAccuracy: 'AI Accuracy',
+        activeTraders: 'Active Traders',
+        builtFor: 'Built for',
+        professionals: 'Professionals',
+        featuresDesc: 'Advanced tools designed to give you the edge in volatile markets',
+        readyToDominate: 'Ready to dominate',
+        theMarkets: 'the markets?',
+        experienceIntelligence: 'Experience institutional-grade trading intelligence today',
+        startFreeTrial: 'Start Free Trial',
+        joinTraders: 'Join 2,500+ Professional Traders',
+        platform: 'Platform',
+        company: 'Company',
+        legal: 'Legal',
+        allRightsReserved: 'All rights reserved.',
+
+        // Feature Titles/Descs
+        featAiTitle: 'AI Pattern Recognition',
+        featAiDesc: 'Advanced neural networks identify bull flags, bear flags, and complex chart patterns with 94% accuracy.',
+        featAnomalyTitle: 'Real-Time Anomaly Detection',
+        featAnomalyDesc: 'Instant alerts for price-OI divergences, funding arbitrage, and correlation decoupling across 500+ markets.',
+        featFundingTitle: 'Funding Rate Intelligence',
+        featFundingDesc: 'Deep derivatives analysis with velocity tracking, trend prediction, and short squeeze identification.',
+        featChartTitle: 'Multi-Chart Command Center',
+        featChartDesc: 'Professional-grade charting with synchronized analysis, custom indicators, and institutional tools.',
+        featVolumeTitle: 'Volume Spike Alerts',
+        featVolumeDesc: 'Flow-based detection system identifies whale movements and abnormal trading activity instantly.',
+        featSignalTitle: 'Smart Signal Engine',
+        featSignalDesc: 'Multi-algorithm approach combining momentum, divergence, and volume analysis for high-probability setups.',
+
+        // Login Modal
+        welcomeBack: 'Welcome Back',
+        enterAccessCode: 'Enter your access code to continue',
+        accessCode: 'Access Code',
+        enterSystem: 'Enter System',
+        accessDenied: 'Access Denied - Invalid Code',
+
+        // Notification Settings
+        notificationSettings: 'Notification Settings',
+        soundAlerts: 'Sound Alerts',
+        soundDesc: 'Play beep sounds for notifications',
+        browserNotifications: 'Browser Notifications',
+        browserDesc: 'Show desktop notifications',
+        bigMoveAlerts: 'Big Move Alerts',
+        bigMoveDesc: 'Notify on significant price movements',
+        signalAlerts: 'Signal Alerts',
+        signalDesc: 'Notify on RMI, Volume, Divergence signals',
+        minPriority: 'Minimum Priority Level',
+        priorityDesc: 'Only notify for signals at or above this priority level',
+        telegramAlerts: 'Telegram Alerts',
+        telegramDesc: 'Receive signals on your mobile',
+        botToken: 'Bot Token',
+        chatId: 'Chat ID',
+        testConnection: 'Test Connection',
+        howToConnect: 'How to Connect?',
+        soundPriorityLevels: 'Sound Priority Levels',
+    },
+    tr: {
+        // Navigation
+        markets: 'Piyasalar',
+        spotSniper: 'Spot Sniper',
+        derivatives: 'Türev Araçlar',
+        radar: 'Radar',
+        portfolio: 'Portföy',
+        signals: 'Sinyaller',
+        nexus: 'Nexus',
+        fidelioAi: 'Fidelio.ai',
+        journal: 'Günlük',
+        database: 'Veritabanı',
+        lab: 'Laboratuvar',
+
+        // Header/Settings
+        preferences: 'Ayarlar',
+        language: 'Dil',
+        turkish: 'Türkçe',
+        english: 'İngilizce',
+        connected: 'Bağlı',
+        connecting: 'Bağlanıyor...',
+        logout: 'Çıkış Yap',
+
+        // Overview/Sections
+        derivativesOverview: 'Türev Piyasası Özeti',
+        derivativesDesc: 'Gerçek zamanlı fonlama oranları ve bir sonraki ödeme zamanlayıcıları.',
+        marketAnomalyRadar: 'Piyasa Anomali Radarı',
+        radarDesc: 'Fiyat/OI sapmaları, Sıkışmalar ve Ayrışma olayları için gerçek zamanlı tarayıcı.',
+        portfolioTracker: 'Portföy Takipçisi',
+        portfolioDesc: 'Varlıkları takip edin ve işlem geçmişini kaydedin.',
+
+        // Modals
+        scalperShortcuts: 'Scalper Kısayolları',
+        navigation: 'Navigasyon',
+        actions: 'Eylemler',
+        close: 'Kapat',
+
+        // Misc
+        vibrant: 'Canlı',
+        minimal: 'Minimal',
+        switchVibrant: 'Canlı Moda Geç',
+        switchMinimal: 'Minimal Moda Geç',
+
+        // Landing Page
+        liveIntelligence: 'Canlı Piyasa İstihbaratı',
+        tradeWith: 'İle İşlem Yap',
+        precision: 'Hassasiyet',
+        heroDesc: 'Kurumsal düzeyde yapay zeka sinyalleri, gerçek zamanlı anomali tespiti ve gelişmiş türev analizi—hepsi bir arada premium arayüzde.',
+        startTrading: 'İşleme Başla',
+        exploreFeatures: 'Özellikleri Keşfet',
+        marketsTracked: 'Takip Edilen Piyasalar',
+        signalsPerDay: 'Günlük Sinyaller',
+        aiAccuracy: 'YZ Doğruluğu',
+        activeTraders: 'Aktif Yatırımcılar',
+        builtFor: 'İçin Tasarlandı',
+        professionals: 'Profesyoneller',
+        featuresDesc: 'Değişken piyasalarda size avantaj sağlamak için tasarlanmış gelişmiş araçlar',
+        readyToDominate: 'Hükmetmeye hazır mısın',
+        theMarkets: 'piyasalara?',
+        experienceIntelligence: 'Kurumsal düzeyde ticaret istihbaratını bugün deneyimleyin',
+        startFreeTrial: 'Ücretsiz Denemeye Başla',
+        joinTraders: '2,500+ Profesyonel Yatırımcıya Katılın',
+        platform: 'Platform',
+        company: 'Şirket',
+        legal: 'Yasal',
+        allRightsReserved: 'Tüm hakları saklıdır.',
+
+        // Feature Titles/Descs
+        featAiTitle: 'YZ Formasyon Tanıma',
+        featAiDesc: 'Gelişmiş sinir ağları; boğa bayrakları, ayı bayrakları ve karmaşık grafik formasyonlarını %94 doğrulukla tanımlar.',
+        featAnomalyTitle: 'Gerçek Zamanlı Anomali Tespiti',
+        featAnomalyDesc: '500+ piyasada fiyat-OI sapmaları, fonlama arbitrajı ve korelasyon ayrışması için anlık uyarılar.',
+        featFundingTitle: 'Fonlama Oranı İstihbaratı',
+        featFundingDesc: 'Hız takibi, trend tahmini ve short squeeze tanımlama ile derin türev analizi.',
+        featChartTitle: 'Çoklu Grafik Komuta Merkezi',
+        featChartDesc: 'Senkronize analiz, özel göstergeler ve kurumsal araçlarla profesyonel düzeyde grafik oluşturma.',
+        featVolumeTitle: 'Hacim Artışı Uyarıları',
+        featVolumeDesc: 'Akış tabanlı algılama sistemi, balina hareketlerini ve anormal işlem aktivitelerini anında tanımlar.',
+        featSignalTitle: 'Akıllı Sinyal Motoru',
+        featSignalDesc: 'Yüksek olasılıklı kurulumlar için momentum, sapma ve hacim analizini birleştiren çoklu algoritma yaklaşımı.',
+
+        // Login Modal
+        welcomeBack: 'Tekrar Hoş Geldiniz',
+        enterAccessCode: 'Devam etmek için erişim kodunuzu girin',
+        accessCode: 'Erişim Kodu',
+        enterSystem: 'Sisteme Giriş Yap',
+        accessDenied: 'Erişim Engellendi - Geçersiz Kod',
+
+        // Notification Settings
+        notificationSettings: 'Bildirim Ayarları',
+        soundAlerts: 'Sesli Uyarılar',
+        soundDesc: 'Bildirimler için ses çal',
+        browserNotifications: 'Tarayıcı Bildirimleri',
+        browserDesc: 'Masaüstü bildirimlerini göster',
+        bigMoveAlerts: 'Büyük Hareket Uyarıları',
+        bigMoveDesc: 'Önemli fiyat hareketlerinde bildir',
+        signalAlerts: 'Sinyal Uyarıları',
+        signalDesc: 'RMI, Hacim, Sapma sinyallerinde bildir',
+        minPriority: 'Minimum Öncelik Seviyesi',
+        priorityDesc: 'Yalnızca bu seviye ve üzerindeki sinyaller için bildir',
+        telegramAlerts: 'Telegram Uyarıları',
+        telegramDesc: 'Sinyalleri mobilde alın',
+        botToken: 'Bot Token',
+        chatId: 'Chat ID',
+        testConnection: 'Bağlantıyı Test Et',
+        howToConnect: 'Nasıl Bağlanılır?',
+        soundPriorityLevels: 'Ses Öncelik Seviyeleri',
+    }
+};
+
+export type TranslationKey = keyof typeof translations.en;

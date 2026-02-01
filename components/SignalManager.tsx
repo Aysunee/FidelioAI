@@ -1,216 +1,347 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Signal, Side } from '../types';
 import { Card } from './ui/Card';
-import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download } from 'lucide-react';
+import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings } from 'lucide-react';
+import { useSignals } from '../context/SignalContext';
+import { Modal } from './ui/Modal';
+import { formatPrice } from '../utils/formatters';
 
 interface SignalManagerProps {
-  signals: Signal[];
-  onDelete: (id: string) => void;
-  onClearAll: () => void;
+    signals: Signal[];
+    onDelete: (id: string) => void;
+    onClearAll: () => void;
 }
 
 export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete, onClearAll }) => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [sideFilter, setSideFilter] = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
-  const [strategyFilter, setStrategyFilter] = useState<string>('ALL');
+    const { signalSettings, updateSignalSettings } = useSignals();
+    const [searchTerm, setSearchTerm] = useState('');
+    const [sideFilter, setSideFilter] = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
+    const [strategyFilter, setStrategyFilter] = useState<string>('ALL');
 
-  // Extract unique strategies for the filter dropdown
-  const uniqueStrategies = useMemo(() => {
-    const strats = new Set(signals.map(s => s.strategy));
-    return ['ALL', ...Array.from(strats)];
-  }, [signals]);
+    // Settings Modal State
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [localSettings, setLocalSettings] = useState(signalSettings);
 
-  const filteredSignals = useMemo(() => {
-    return signals.filter(sig => {
-      const matchesSearch = sig.symbol.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                            sig.note?.toLowerCase().includes(searchTerm.toLowerCase());
-      
-      const matchesSide = sideFilter === 'ALL' 
-        ? true 
-        : (sideFilter === 'LONG' ? (sig.side === 'BUY' || sig.side === 'LONG') : (sig.side === 'SELL' || sig.side === 'SHORT'));
+    useEffect(() => {
+        if (isSettingsOpen) setLocalSettings(signalSettings);
+    }, [isSettingsOpen, signalSettings]);
 
-      const matchesStrategy = strategyFilter === 'ALL' ? true : sig.strategy === strategyFilter;
+    const handleSaveSettings = () => {
+        updateSignalSettings(localSettings);
+        setIsSettingsOpen(false);
+    };
 
-      return matchesSearch && matchesSide && matchesStrategy;
-    });
-  }, [signals, searchTerm, sideFilter, strategyFilter]);
+    // Extract unique strategies for the filter dropdown
+    const uniqueStrategies = useMemo(() => {
+        const strats = new Set(signals.map(s => s.strategy));
+        return ['ALL', ...Array.from(strats)];
+    }, [signals]);
 
-  const formatTime = (isoStr: string) => {
-    return new Date(isoStr).toLocaleString(undefined, {
-      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
-    });
-  };
+    const filteredSignals = useMemo(() => {
+        return signals.filter(sig => {
+            const matchesSearch = sig.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                sig.note?.toLowerCase().includes(searchTerm.toLowerCase());
 
-  const exportCSV = () => {
-    const headers = ['Time', 'Symbol', 'Side', 'Price', 'Strategy', 'Note'];
-    const rows = filteredSignals.map(s => [
-        s.time, s.symbol, s.side, s.price, s.strategy, s.note || ''
-    ]);
-    const csvContent = "data:text/csv;charset=utf-8," 
-        + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `signals_export_${Date.now()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
+            const matchesSide = sideFilter === 'ALL'
+                ? true
+                : (sideFilter === 'LONG' ? (sig.side === 'BUY' || sig.side === 'LONG') : (sig.side === 'SELL' || sig.side === 'SHORT'));
 
-  return (
-    <Card className="h-full flex flex-col" noPadding>
-      {/* Header & Filters */}
-      <div className="p-5 border-b border-border bg-surface flex flex-col xl:flex-row gap-4 justify-between items-start xl:items-center">
-        <div>
-            <h2 className="text-xl font-bold text-text flex items-center gap-2">
-                <Zap className="text-brand" size={24} />
-                Signal Manager
-            </h2>
-            <p className="text-secondary text-sm mt-1">
-                Manage, analyze, and audit all generated trading signals.
-            </p>
-        </div>
+            const matchesStrategy = strategyFilter === 'ALL' ? true : sig.strategy === strategyFilter;
 
-        <div className="flex flex-wrap items-center gap-3 w-full xl:w-auto">
-             {/* Search */}
-             <div className="relative flex-1 min-w-[200px]">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-secondary" size={14} />
-                <input 
-                    type="text" 
-                    placeholder="Search Symbol..." 
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-full bg-surface-secondary border border-transparent focus:border-primary rounded-lg pl-9 pr-4 py-2 text-sm text-text focus:outline-none transition-all"
-                />
-             </div>
+            return matchesSearch && matchesSide && matchesStrategy;
+        });
+    }, [signals, searchTerm, sideFilter, strategyFilter]);
 
-             {/* Filters */}
-             <select 
-                value={sideFilter}
-                onChange={(e) => setSideFilter(e.target.value as any)}
-                className="bg-surface-secondary border border-transparent focus:border-primary rounded-lg px-3 py-2 text-sm font-medium text-text focus:outline-none cursor-pointer"
-             >
-                <option value="ALL">All Sides</option>
-                <option value="LONG">Long / Buy</option>
-                <option value="SHORT">Short / Sell</option>
-             </select>
+    const formatTime = (isoStr: string) => {
+        return new Date(isoStr).toLocaleString(undefined, {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+    };
 
-             <select 
-                value={strategyFilter}
-                onChange={(e) => setStrategyFilter(e.target.value)}
-                className="bg-surface-secondary border border-transparent focus:border-primary rounded-lg px-3 py-2 text-sm font-medium text-text focus:outline-none cursor-pointer max-w-[150px]"
-             >
-                {uniqueStrategies.map(s => (
-                    <option key={s} value={s}>{s === 'ALL' ? 'All Strategies' : s}</option>
-                ))}
-             </select>
+    const exportCSV = () => {
+        const headers = ['Time', 'Symbol', 'Side', 'Price', 'Strategy', 'Note'];
+        const rows = filteredSignals.map(s => [
+            s.time, s.symbol, s.side, s.price, s.strategy, s.note || ''
+        ]);
+        const csvContent = "data:text/csv;charset=utf-8,"
+            + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `signals_export_${Date.now()}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
 
-             {/* Actions */}
-             <div className="h-8 w-[1px] bg-border mx-1 hidden sm:block"></div>
-             
-             <button 
-                onClick={exportCSV}
-                className="p-2 text-secondary hover:text-text hover:bg-surface-secondary rounded-lg transition-colors"
-                title="Export CSV"
-             >
-                <Download size={18} />
-             </button>
-
-             <button 
-                onClick={onClearAll}
-                className="flex items-center gap-2 px-3 py-2 bg-danger/10 hover:bg-danger/20 text-danger rounded-lg text-sm font-medium transition-colors"
-             >
-                <Trash2 size={16} />
-                <span className="hidden sm:inline">Clear All</span>
-             </button>
-        </div>
-      </div>
-
-      {/* Table */}
-      <div className="flex-1 overflow-auto bg-surface-secondary/10">
-        <table className="min-w-full divide-y divide-border">
-            <thead className="bg-surface sticky top-0 z-10 shadow-sm">
-                <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Time</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Symbol</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Side</th>
-                    <th className="px-6 py-3 text-right text-xs font-semibold text-secondary uppercase tracking-wider">Price</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Strategy</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider hidden md:table-cell">Context</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-secondary uppercase tracking-wider">Action</th>
-                </tr>
-            </thead>
-            <tbody className="bg-surface divide-y divide-border">
-                {filteredSignals.length === 0 ? (
-                    <tr>
-                        <td colSpan={7} className="px-6 py-12 text-center text-secondary">
-                            <div className="flex flex-col items-center justify-center gap-3">
-                                <Filter size={32} className="opacity-20" />
-                                <p>No signals found matching criteria.</p>
+    return (
+        <Card className="h-full flex flex-col" noPadding>
+            {/* Settings Modal */}
+            <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Signal Parameters">
+                <div className="space-y-6">
+                    {/* Volume Settings */}
+                    <div className="space-y-3">
+                        <h3 className="text-sm font-bold text-brand uppercase tracking-wider flex items-center gap-2">
+                            <Zap size={14} /> Volume Spike Detection
+                        </h3>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-1">
+                                <label className="text-xs text-secondary">Spike Threshold (x)</label>
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    value={localSettings.volume.threshold}
+                                    onChange={e => setLocalSettings({ ...localSettings, volume: { ...localSettings.volume, threshold: parseFloat(e.target.value) } })}
+                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                                />
+                                <p className="text-[10px] text-secondary">Multiplier of avg flow (e.g. 3.0x)</p>
                             </div>
-                        </td>
-                    </tr>
-                ) : (
-                    filteredSignals.map((sig) => {
-                        const isLong = sig.side === 'BUY' || sig.side === 'LONG';
-                        const symbolBase = sig.symbol.replace('USDT', '');
-                        const iconUrl = `https://assets.coincap.io/assets/icons/${symbolBase.toLowerCase()}@2x.png`;
+                            <div className="space-y-1">
+                                <label className="text-xs text-secondary">Cooldown (sec)</label>
+                                <input
+                                    type="number"
+                                    value={localSettings.volume.cooldown}
+                                    onChange={e => setLocalSettings({ ...localSettings, volume: { ...localSettings.volume, cooldown: parseInt(e.target.value) } })}
+                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                                />
+                            </div>
+                        </div>
+                    </div>
 
-                        return (
-                            <tr key={sig.id} className="hover:bg-surface-secondary/50 transition-colors group">
-                                <td className="px-6 py-4 whitespace-nowrap text-xs font-mono text-secondary">
-                                    {formatTime(sig.time)}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="flex items-center gap-3">
-                                        <div className="relative w-6 h-6 rounded-full bg-surface-secondary flex items-center justify-center shrink-0 overflow-hidden">
-                                            <img 
-                                                src={iconUrl} 
-                                                className="absolute inset-0 w-full h-full object-cover"
-                                                onError={(e) => e.currentTarget.style.display = 'none'}
-                                            />
-                                        </div>
-                                        <span className="font-bold text-sm text-text">{symbolBase}</span>
+                    {/* Momentum Settings */}
+                    <div className="space-y-3 pt-4 border-t border-border">
+                        <h3 className="text-sm font-bold text-brand uppercase tracking-wider flex items-center gap-2">
+                            <ArrowUpRight size={14} /> Momentum (RMI)
+                        </h3>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-1">
+                                <label className="text-xs text-secondary">Price Change (%)</label>
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    value={localSettings.momentum.threshold}
+                                    onChange={e => setLocalSettings({ ...localSettings, momentum: { ...localSettings.momentum, threshold: parseFloat(e.target.value) } })}
+                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                                />
+                                <p className="text-[10px] text-secondary">Trigger threshold (e.g. 4.5%)</p>
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-xs text-secondary">Cooldown (sec)</label>
+                                <input
+                                    type="number"
+                                    value={localSettings.momentum.cooldown}
+                                    onChange={e => setLocalSettings({ ...localSettings, momentum: { ...localSettings.momentum, cooldown: parseInt(e.target.value) } })}
+                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Divergence Settings */}
+                    <div className="space-y-3 pt-4 border-t border-border">
+                        <h3 className="text-sm font-bold text-brand uppercase tracking-wider flex items-center gap-2">
+                            <ArrowDownRight size={14} /> Smart Money Div
+                        </h3>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-1">
+                                <label className="text-xs text-secondary">Funding Threshold</label>
+                                <input
+                                    type="number"
+                                    step="0.0001"
+                                    value={localSettings.divergence.fundingThreshold}
+                                    onChange={e => setLocalSettings({ ...localSettings, divergence: { ...localSettings.divergence, fundingThreshold: parseFloat(e.target.value) } })}
+                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                                />
+                                <p className="text-[10px] text-secondary">Negative funding limit (e.g. -0.0005)</p>
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-xs text-secondary">Cooldown (sec)</label>
+                                <input
+                                    type="number"
+                                    value={localSettings.divergence.cooldown}
+                                    onChange={e => setLocalSettings({ ...localSettings, divergence: { ...localSettings.divergence, cooldown: parseInt(e.target.value) } })}
+                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="pt-4 flex justify-end gap-3">
+                        <button
+                            onClick={() => setIsSettingsOpen(false)}
+                            className="px-4 py-2 text-sm font-medium text-secondary hover:text-text transition-colors"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={handleSaveSettings}
+                            className="px-4 py-2 text-sm font-bold bg-brand text-white rounded-lg hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
+                        >
+                            Save Parameters
+                        </button>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* Header & Filters */}
+            <div className="p-5 border-b border-border bg-surface flex flex-col xl:flex-row gap-4 justify-between items-start xl:items-center">
+                <div>
+                    <h2 className="text-xl font-bold text-text flex items-center gap-2">
+                        <Zap className="text-brand" size={24} />
+                        Signal Manager
+                    </h2>
+                    <p className="text-secondary text-sm mt-1">
+                        Manage, analyze, and audit all generated trading signals.
+                    </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 w-full xl:w-auto">
+                    {/* Search */}
+                    <div className="relative flex-1 min-w-[200px]">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-secondary" size={14} />
+                        <input
+                            type="text"
+                            placeholder="Search Symbol..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full bg-surface-secondary border border-transparent focus:border-primary rounded-lg pl-9 pr-4 py-2 text-sm text-text focus:outline-none transition-all"
+                        />
+                    </div>
+
+                    {/* Filters */}
+                    <select
+                        value={sideFilter}
+                        onChange={(e) => setSideFilter(e.target.value as any)}
+                        className="bg-surface-secondary border border-transparent focus:border-primary rounded-lg px-3 py-2 text-sm font-medium text-text focus:outline-none cursor-pointer"
+                    >
+                        <option value="ALL">All Sides</option>
+                        <option value="LONG">Long / Buy</option>
+                        <option value="SHORT">Short / Sell</option>
+                    </select>
+
+                    <select
+                        value={strategyFilter}
+                        onChange={(e) => setStrategyFilter(e.target.value)}
+                        className="bg-surface-secondary border border-transparent focus:border-primary rounded-lg px-3 py-2 text-sm font-medium text-text focus:outline-none cursor-pointer max-w-[150px]"
+                    >
+                        {uniqueStrategies.map(s => (
+                            <option key={s} value={s}>{s === 'ALL' ? 'All Strategies' : s}</option>
+                        ))}
+                    </select>
+
+                    {/* Actions */}
+                    <div className="h-8 w-[1px] bg-border mx-1 hidden sm:block"></div>
+
+                    <button
+                        onClick={() => setIsSettingsOpen(true)}
+                        className="p-2 text-secondary hover:text-brand hover:bg-brand/10 rounded-lg transition-colors"
+                        title="Signal Parameters"
+                    >
+                        <Settings size={18} />
+                    </button>
+
+                    <button
+                        onClick={exportCSV}
+                        className="p-2 text-secondary hover:text-text hover:bg-surface-secondary rounded-lg transition-colors"
+                        title="Export CSV"
+                    >
+                        <Download size={18} />
+                    </button>
+
+                    <button
+                        onClick={onClearAll}
+                        className="flex items-center gap-2 px-3 py-2 bg-danger/10 hover:bg-danger/20 text-danger rounded-lg text-sm font-medium transition-colors"
+                    >
+                        <Trash2 size={16} />
+                        <span className="hidden sm:inline">Clear All</span>
+                    </button>
+                </div>
+            </div>
+
+            {/* Table */}
+            <div className="flex-1 overflow-auto bg-surface-secondary/10">
+                <table className="min-w-full divide-y divide-border">
+                    <thead className="bg-surface sticky top-0 z-10 shadow-sm">
+                        <tr>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Time</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Symbol</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Side</th>
+                            <th className="px-6 py-3 text-right text-xs font-semibold text-secondary uppercase tracking-wider">Price</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Strategy</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider hidden md:table-cell">Context</th>
+                            <th className="px-4 py-3 text-right text-xs font-semibold text-secondary uppercase tracking-wider">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody className="bg-surface divide-y divide-border">
+                        {filteredSignals.length === 0 ? (
+                            <tr>
+                                <td colSpan={7} className="px-6 py-12 text-center text-secondary">
+                                    <div className="flex flex-col items-center justify-center gap-3">
+                                        <Filter size={32} className="opacity-20" />
+                                        <p>No signals found matching criteria.</p>
                                     </div>
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold ${
-                                        isLong ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'
-                                    }`}>
-                                        {isLong ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-                                        {sig.side}
-                                    </span>
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-mono font-medium text-text">
-                                    {sig.price.toLocaleString()}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-xs font-medium text-text bg-surface-secondary px-2 py-1 rounded w-fit border border-border">
-                                        {sig.strategy}
-                                    </div>
-                                </td>
-                                <td className="px-6 py-4 hidden md:table-cell">
-                                    <div className="text-xs text-secondary max-w-[200px] truncate" title={sig.note}>
-                                        {sig.note || '-'}
-                                    </div>
-                                </td>
-                                <td className="px-4 py-4 whitespace-nowrap text-right">
-                                    <button 
-                                        onClick={() => onDelete(sig.id)}
-                                        className="text-secondary hover:text-danger p-2 hover:bg-danger/10 rounded-full transition-all opacity-0 group-hover:opacity-100"
-                                        title="Delete Signal"
-                                    >
-                                        <Trash2 size={16} />
-                                    </button>
                                 </td>
                             </tr>
-                        );
-                    })
-                )}
-            </tbody>
-        </table>
-      </div>
-    </Card>
-  );
+                        ) : (
+                            filteredSignals.map((sig) => {
+                                const isLong = sig.side === 'BUY' || sig.side === 'LONG';
+                                const symbolBase = sig.symbol.replace('USDT', '');
+                                const iconUrl = `https://assets.coincap.io/assets/icons/${symbolBase.toLowerCase()}@2x.png`;
+
+                                return (
+                                    <tr key={sig.id} className="hover:bg-surface-secondary/50 transition-colors group">
+                                        <td className="px-6 py-4 whitespace-nowrap text-xs font-mono text-secondary">
+                                            {formatTime(sig.time)}
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap">
+                                            <div className="flex items-center gap-3">
+                                                <div className="relative w-6 h-6 rounded-full bg-surface-secondary flex items-center justify-center shrink-0 overflow-hidden">
+                                                    <img
+                                                        src={iconUrl}
+                                                        className="absolute inset-0 w-full h-full object-cover"
+                                                        onError={(e) => e.currentTarget.style.display = 'none'}
+                                                    />
+                                                </div>
+                                                <span className="font-bold text-sm text-text">{symbolBase}</span>
+                                            </div>
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap">
+                                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold ${isLong ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'
+                                                }`}>
+                                                {isLong ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+                                                {sig.side}
+                                            </span>
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-mono font-medium text-text">
+                                            {formatPrice(sig.price)}
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap">
+                                            <div className="text-xs font-medium text-text bg-surface-secondary px-2 py-1 rounded w-fit border border-border">
+                                                {sig.strategy}
+                                            </div>
+                                        </td>
+                                        <td className="px-6 py-4 hidden md:table-cell">
+                                            <div className="text-xs text-secondary max-w-[200px] truncate" title={sig.note}>
+                                                {sig.note || '-'}
+                                            </div>
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap text-right">
+                                            <button
+                                                onClick={() => onDelete(sig.id)}
+                                                className="text-secondary hover:text-danger p-2 hover:bg-danger/10 rounded-full transition-all opacity-0 group-hover:opacity-100"
+                                                title="Delete Signal"
+                                            >
+                                                <Trash2 size={16} />
+                                            </button>
+                                        </td>
+                                    </tr>
+                                );
+                            })
+                        )}
+                    </tbody>
+                </table>
+            </div>
+        </Card>
+    );
 };

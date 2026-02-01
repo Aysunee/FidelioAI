@@ -1,0 +1,522 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Bybit Light Mode (Usually Grey/White) */
+  --bg-background: #F7F7F7;
+  --bg-surface: #FFFFFF;
+  --bg-surface-secondary: #F0F0F0;
+  --bg-surface-highlight: #EAECEF;
+  --color-border: #E6E8EA;
+
+  --color-text: #1E2329;
+  --color-text-secondary: #848E9C;
+
+  /* Bybit Brand Colors */
+  --color-brand: #F7A600;
+  /* Bybit Yellow */
+
+  /* Trading Colors */
+  --color-success: #2DBD85;
+  --color-danger: #F6465D;
+  --color-warning: #F7A600;
+
+  --shadow-card: 0 2px 4px rgba(0, 0, 0, 0.05);
+  --radius-card: 8px;
+  --radius-sm: 4px;
+}
+
+.dark {
+  /* Bybit Dark Mode */
+  --bg-background: #121212;
+  /* Deep background */
+  --bg-surface: #1E1F24;
+  /* Card background */
+  --bg-surface-secondary: #2B2D36;
+  /* Hover/Inputs */
+  --bg-surface-highlight: #363A45;
+  --color-border: #2E323D;
+
+  --color-text: #EAECEF;
+  --color-text-secondary: #848E9C;
+
+  --color-brand: #F7A600;
+
+  /* Adjusted for Dark Mode contrast */
+  --color-success: #2DBD85;
+  --color-danger: #F6465D;
+  --color-warning: #F7A600;
+
+  --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.2);
+
+  /* Matrix Slots */
+  --bg-matrix-slot: rgba(255, 255, 255, 0.05);
+  --border-matrix-slot: rgba(255, 255, 255, 0.05);
+  --matrix-image-opacity: 0.6;
+}
+
+/* Professional Light Theme - Clean & Readable Trading UI */
+.corporate {
+  /* Backgrounds - Distinct levels for depth */
+  --bg-primary: #F3F4F6;
+  /* Light grey for contrast with cards */
+  --bg-surface: #FFFFFF;
+  /* Pure white cards */
+  --bg-surface-secondary: #E5E7EB;
+  /* Subtle grey for sectioning */
+  --bg-surface-highlight: #D1D5DB;
+  /* Hover states */
+  --bg-elevated: #FFFFFF;
+
+  /* Text - Deep, high-contrast */
+  --color-text: #0F172A;
+  /* Deep slate */
+  --color-text-secondary: #334155;
+  --color-text-tertiary: #64748B;
+  --color-text-muted: #94A3B8;
+
+  /* Borders - More defined in light mode */
+  --color-border-subtle: rgba(0, 0, 0, 0.05);
+  --color-border: rgba(0, 0, 0, 0.1);
+  --color-border-strong: rgba(0, 0, 0, 0.2);
+
+  /* Brand - Elegant Indigo */
+  --color-brand: #4F46E5;
+  --color-brand-light: #6366F1;
+  --color-brand-dark: #3730A3;
+  --color-brand-glow: rgba(79, 70, 229, 0.15);
+
+  /* Semantic - Punchy status colors */
+  --color-success: #10B981;
+  --color-success-light: #34D399;
+  --color-success-dark: #065F46;
+  --color-success-glow: rgba(16, 185, 129, 0.1);
+
+  --color-danger: #EF4444;
+  --color-danger-light: #F87171;
+  --color-danger-dark: #991B1B;
+  --color-danger-glow: rgba(239, 68, 68, 0.1);
+
+  --color-warning: #F59E0B;
+  --color-warning-light: #FBBF24;
+  --color-warning-dark: #B45309;
+  --color-warning-glow: rgba(245, 158, 11, 0.1);
+
+  --color-info: #3B82F6;
+  --color-info-light: #60A5FA;
+  --color-info-dark: #1D4ED8;
+
+  /* Overlays */
+  --overlay-light: rgba(0, 0, 0, 0.05);
+  --overlay-medium: rgba(0, 0, 0, 0.1);
+  --overlay-heavy: rgba(0, 0, 0, 0.3);
+
+  /* Matrix Slots (Image Containers) */
+  --bg-matrix-slot: #E5E7EB;
+  --border-matrix-slot: rgba(0, 0, 0, 0.1);
+  --matrix-image-opacity: 0.9;
+}
+
+/* ===== LABS THEME ===== */
+.labs {
+  /* Backgrounds - Ultra-clean */
+  --bg-primary: #F8FAFC;
+  --bg-surface: #FFFFFF;
+  --bg-surface-secondary: #F1F5F9;
+  --bg-surface-highlight: #E2E8F0;
+  --bg-elevated: #FFFFFF;
+
+  /* Text - Modern Google style */
+  --color-text: #1E293B;
+  --color-text-secondary: #475569;
+  --color-text-tertiary: #94A3B8;
+  --color-text-muted: #CBD5E1;
+
+  /* Borders */
+  --color-border-subtle: rgba(0, 0, 0, 0.04);
+  --color-border: rgba(0, 0, 0, 0.08);
+  --color-border-strong: rgba(0, 0, 0, 0.15);
+
+  /* Brand - Modern Indigo-Violet */
+  --color-brand: #6366F1;
+  --color-brand-light: #818CF8;
+  --color-brand-dark: #4F46E5;
+  --color-brand-glow: rgba(99, 102, 241, 0.1);
+
+  /* Semantic */
+  --color-success: #059669;
+  --color-success-light: #10B981;
+  --color-success-dark: #064E3B;
+  --color-success-glow: rgba(5, 150, 105, 0.08);
+
+  --color-danger: #DC2626;
+  --color-danger-light: #EF4444;
+  --color-danger-dark: #7F1D1D;
+  --color-danger-glow: rgba(220, 38, 38, 0.08);
+
+  --color-warning: #D97706;
+  --color-warning-light: #F59E0B;
+  --color-warning-dark: #78350F;
+
+  --color-info: #0EA5E9;
+
+  /* Matrix Slots */
+  --bg-matrix-slot: #F1F5F9;
+  --border-matrix-slot: rgba(0, 0, 0, 0.05);
+  --matrix-image-opacity: 0.95;
+}
+
+/* ===================================
+   BASE STYLES
+   =================================== */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+  background: var(--bg-primary);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* ===================================
+   SCROLLBAR STYLES
+   =================================== */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.corporate ::-webkit-scrollbar-thumb,
+.labs ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.corporate ::-webkit-scrollbar-thumb:hover,
+.labs ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+/* Thin scrollbar */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+/* Hide scrollbar */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ===================================
+   GLASSMORPHISM UTILITIES
+   =================================== */
+
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-strong {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.corporate .glass,
+.labs .glass {
+  background: rgba(255, 255, 255, 0.85);
+  /* Slightly less translucent for readability */
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  /* More visible border */
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  /* Subtle depth */
+}
+
+.corporate .glass-strong,
+.labs .glass-strong {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+}
+
+/* ===================================
+   MINIMAL MODE
+   =================================== */
+
+.minimal-mode .glass,
+.minimal-mode .glass-strong {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: none;
+}
+
+/* ===================================
+   GRADIENT UTILITIES
+   =================================== */
+
+.text-gradient-violet {
+  background: linear-gradient(135deg, #A855F7 0%, #EC4899 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-gold {
+  background: linear-gradient(135deg, #FBBF24 0%, #F59E0B 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-emerald {
+  background: linear-gradient(135deg, #6EE7B7 0%, #10B981 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Background gradients */
+.bg-gradient-violet {
+  background: linear-gradient(135deg, #9333EA 0%, #7E22CE 100%);
+}
+
+.bg-gradient-violet-subtle {
+  background: linear-gradient(135deg, rgba(147, 51, 234, 0.1) 0%, rgba(126, 34, 206, 0.1) 100%);
+}
+
+.bg-gradient-gold {
+  background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
+}
+
+.bg-gradient-gold-subtle {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.1) 0%, rgba(217, 119, 6, 0.1) 100%);
+}
+
+.bg-gradient-emerald {
+  background: linear-gradient(135deg, #10B981 0%, #059669 100%);
+}
+
+.bg-gradient-emerald-subtle {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(5, 150, 105, 0.1) 100%);
+}
+
+/* Feature gradients */
+.bg-gradient-ai {
+  background: linear-gradient(135deg, #A855F7 0%, #EC4899 100%);
+}
+
+.bg-gradient-derivatives {
+  background: linear-gradient(135deg, #F59E0B 0%, #EF4444 100%);
+}
+
+.bg-gradient-market {
+  background: linear-gradient(135deg, #10B981 0%, #059669 100%);
+}
+
+/* Ambient backgrounds */
+.bg-ambient-violet {
+  background: radial-gradient(circle at 50% 0%, rgba(147, 51, 234, 0.12) 0%, transparent 50%);
+}
+
+.bg-ambient-gold {
+  background: radial-gradient(circle at 100% 100%, rgba(217, 119, 6, 0.08) 0%, transparent 50%);
+}
+
+.bg-ambient-emerald {
+  background: radial-gradient(circle at 0% 50%, rgba(16, 185, 129, 0.08) 0%, transparent 50%);
+}
+
+/* ===================================
+   SHADOW UTILITIES
+   =================================== */
+
+.shadow-glow-violet {
+  box-shadow: 0 10px 40px -10px rgba(147, 51, 234, 0.3);
+}
+
+.shadow-glow-gold {
+  box-shadow: 0 10px 40px -10px rgba(245, 158, 11, 0.3);
+}
+
+.shadow-glow-emerald {
+  box-shadow: 0 10px 40px -10px rgba(16, 185, 129, 0.3);
+}
+
+.shadow-glow-rose {
+  box-shadow: 0 10px 40px -10px rgba(239, 68, 68, 0.3);
+}
+
+/* Refined shadows for light themes */
+.corporate .shadow-glow-violet,
+.labs .shadow-glow-violet {
+  box-shadow: 0 10px 30px -10px rgba(99, 102, 241, 0.25);
+}
+
+.corporate .shadow-glow-gold,
+.labs .shadow-glow-gold {
+  box-shadow: 0 10px 30px -10px rgba(217, 119, 6, 0.25);
+}
+
+/* ===================================
+   ANIMATION UTILITIES
+   =================================== */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.animate-enter {
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-fade {
+  animation: fadeIn 0.4s ease-out;
+}
+
+.animate-pulse-slow {
+  animation: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-scale {
+  animation: scaleIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-spin-slow {
+  animation: spin-slow 8s linear infinite;
+}
+
+@keyframes gradient-x {
+
+  0%,
+  100% {
+    background-size: 200% 200%;
+    background-position: left center;
+  }
+
+  50% {
+    background-size: 200% 200%;
+    background-position: right center;
+  }
+}
+
+.animate-gradient-x {
+  animation: gradient-x 3s ease infinite;
+}
+
+/* ===================================
+   UTILITY CLASSES
+   =================================== */
+
+.backdrop-blur-strong {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.transition-smooth {
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.transition-fast {
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Screen reader only */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}

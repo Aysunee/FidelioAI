@@ -3,6 +3,9 @@
 export interface Ticker {
   symbol: string;
   lastPrice: number;
+  openPrice: number;
+  highPrice: number;
+  lowPrice: number;
   priceChangePercent: number;
   volume: number;
   updatedAt: number;
@@ -14,6 +17,12 @@ export interface FuturesTicker {
   fundingRate: number; // 0.0001 = 0.01%
   nextFundingTime: number;
   indexPrice: number;
+  lastPrice?: number;
+  highPrice?: number;
+  lowPrice?: number;
+  openPrice?: number;
+  volume?: number;
+  priceChangePercent?: number;
   // Computed for UI
   sessionStartRate?: number; // To track change since session started
   sessionChange?: number;
@@ -29,6 +38,18 @@ export interface MarketIndex {
 
 export type Side = 'BUY' | 'SELL' | 'LONG' | 'SHORT' | 'CLOSE';
 
+export interface BigMoveSignal {
+  id: string;
+  symbol: string;
+  type: 'RISE' | 'FALL' | 'HIGH' | 'LOW' | 'PULLBACK' | 'RALLY' | 'VOL_SPIKE' | 'WHALE';
+  timeframe?: '5m' | '15m' | '2h' | '24h' | '7d' | '30d';
+  changePercent?: number;
+  price: number;
+  description: string;
+  timestamp: number;
+  level: 'SMALL' | 'MID' | 'HIGH';
+}
+
 export interface Signal {
   id: string;
   strategy: string;
@@ -36,9 +57,9 @@ export interface Signal {
   side: Side;
   price: number;
   time: string; // ISO string or HH:mm:ss
-  note?: string;
-  source?: string;
+  note: string;
   confidence?: number;
+  source?: 'WEBHOOK' | 'ALGO_MOMENTUM' | 'ALGO_DIVERGENCE' | 'ALGO_VOLUME' | 'MANUAL';
 }
 
 export interface Liquidation {
@@ -98,4 +119,30 @@ export interface ToastMessage {
   title: string;
   description: string;
   type: 'success' | 'alert' | 'info';
+}
+
+// User Management Types
+export type UserRole = 'admin' | 'trader' | 'viewer' | 'analyst';
+export type Permission = 'view_dashboard' | 'manage_trades' | 'manage_users' | 'view_analytics' | 'manage_settings';
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  username: string;
+  password: string;
+  role: UserRole;
+  status: 'active' | 'inactive';
+  createdAt: number;
+  updatedAt: number;
+  permissions: Permission[];
+  lastLogin?: number;
+}
+
+export interface UserActivity {
+  id: string;
+  userId: string;
+  action: string;
+  timestamp: number;
+  details?: string;
 }
