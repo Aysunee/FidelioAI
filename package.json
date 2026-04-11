@@ -7,7 +7,11 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "start": "node server/index.cjs"
+    "start": "node server/index.cjs",
+    "webhook": "node --env-file=.env.webhook server/webhook.cjs",
+    "db:up": "docker compose --env-file .env.webhook up -d postgres",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
