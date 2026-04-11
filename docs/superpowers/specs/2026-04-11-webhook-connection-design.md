@@ -112,12 +112,19 @@ Port forward verification başarısız olursa (CGNAT, router kilitli):
 
 ```ini
 PORT=3001
-WEBHOOK_SECRET=<openssl rand -hex 32>
+WEBHOOK_SECRET=<REPLACE_WITH_OUTPUT_OF: openssl rand -hex 32>
 ALLOWED_ORIGINS=http://localhost:3000
-DATABASE_URL=postgres://fidelio:<POSTGRES_PASSWORD>@localhost:5432/fidelio_signals
-GEMINI_API_KEY=<mevcut>
-POSTGRES_PASSWORD=<openssl rand -hex 16>
+DATABASE_URL=postgres://fidelio:<REPLACE_WITH_POSTGRES_PASSWORD>@localhost:5432/fidelio_signals
+GEMINI_API_KEY=<mevcut değer — değiştirme>
+POSTGRES_PASSWORD=<REPLACE_WITH_OUTPUT_OF: openssl rand -hex 16>
 ```
+
+**Secret'ları üret ve `.env`'e yapıştır (implementation adımı):**
+```bash
+echo "WEBHOOK_SECRET=$(openssl rand -hex 32)"
+echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+```
+Çıktıları `.env` içine literal değer olarak yaz. `<...>` placeholder'ları literal bırakılmaz — commit hatasına yol açar.
 
 `.gitignore`'a `.env`, `postgres_data/`, `server/signals_db.json` eklenir. Node 20.6+ native `--env-file` desteği kullanılır — `dotenv` paketi eklenmez.
 
@@ -354,7 +361,7 @@ const handleInject = async (e: React.FormEvent) => {
 };
 ```
 
-`onManualSignal` prop'u artık kullanılmıyor olabilir (çağırma yerlerine bakılır, gereksizse kaldırılır).
+`handleInject` backend'e POST atıp socket.io echo'sunu beklediği için `onManualSignal` prop'unun UI güncelleme rolü kalmıyor. Implementation adımı: `WebhookManagerProps` interface'inden `onManualSignal` kaldırılır, `App.tsx` (ve prop'u geçen diğer parent'lar) bu prop'u geçmeyecek şekilde güncellenir. Eğer başka bir çağrım noktası varsa (Grep: `onManualSignal`) onlar da audit edilir.
 
 ### 5.7 `testWebhook` — Secret İle POST
 
