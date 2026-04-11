@@ -22,3 +22,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Sibling project copy kept on disk but not tracked in this repo
+tradevision-pro-dashboard 2/
+
+# Legacy JSON signal storage (replaced by Postgres — spec §4.4)
+server/signals_db.json
+server/signals.json
+
+# Webhook connection work
+.env
+postgres_data/
