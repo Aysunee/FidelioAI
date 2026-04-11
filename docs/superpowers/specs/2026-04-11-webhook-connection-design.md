@@ -285,17 +285,55 @@ export const config = {
 } as const;
 ```
 
-Tüm hardcoded `http://localhost:3001` ve `http://localhost:80` referansları bu config'e bağlanır.
+`config` type'ı opsiyonel `analyzeUrl` de içermeli:
+```ts
+analyzeUrl: `${BACKEND_URL}/api/analyze`,
+```
 
-### 5.3 `context/SignalContext.tsx` URL Refactor
+Tüm hardcoded `http://localhost:3001` ve `http://localhost:80` referansları bu config'e bağlanır. **Plan yazımı sırasında grep taramasıyla bulunan gerçek refactor kapsamı 8 dosya ve ~16 yerde:**
 
-| Satır | Önce | Sonra |
+### 5.3 URL Refactor Kapsamı (Tüm Dosyalar)
+
+#### 5.3.1 `context/SignalContext.tsx` (4 yer)
+| Satır (yaklaşık) | Önce | Sonra |
 |---|---|---|
-| ~2 | — | `import { config } from '../services/config';` |
+| Üst import bloğu | — | `import { config } from '../services/config';` |
 | ~234 | `fetch('http://localhost:3001/api/forward', ...)` | `fetch(config.forwardUrl, ...)` |
 | ~258 | `io('http://localhost:3001', ...)` | `io(config.socketUrl, ...)` |
 | ~274 | `fetch('http://localhost:3001/api/signals')` | `fetch(config.signalsUrl)` |
 | ~386 | `fetch('http://localhost:3001/api/webhook', ...)` | `fetch(config.webhookUrl, ...)` |
+
+#### 5.3.2 `services/aiService.ts` (1 yer)
+| Satır | Önce | Sonra |
+|---|---|---|
+| ~29 | `fetch('http://localhost:3001/api/analyze', ...)` | `fetch(config.analyzeUrl, ...)` |
+
+#### 5.3.3 `components/SystemDiagnostics.tsx` (5 yer)
+| Satır (yaklaşık) | Önce | Sonra |
+|---|---|---|
+| ~35 | `fetch('http://localhost:3001/health')` | `fetch(config.healthUrl)` |
+| ~49 | `fetch('http://localhost:3001/api/signals')` | `fetch(config.signalsUrl)` |
+| ~60 | `fetch('http://localhost:3001/api/webhook', ...)` | `fetch(config.webhookUrl, ...)` |
+| ~86 | `fetch('http://localhost:3001/api/analyze', ...)` | `fetch(config.analyzeUrl, ...)` |
+| ~252 | Display string `http://localhost:3001/health` | `{config.healthUrl}` (veya `${config.backendUrl}/health`) |
+
+#### 5.3.4 `components/DatabaseViewer.tsx` (2 yer)
+| Satır (yaklaşık) | Önce | Sonra |
+|---|---|---|
+| ~18 | `fetch('http://localhost:3001/api/signals')` | `fetch(config.signalsUrl)` |
+| ~36 | `fetch('http://localhost:3001/api/webhook', ...)` | `fetch(config.webhookUrl, ...)` |
+
+#### 5.3.5 `components/NotificationSettingsPanel.tsx` (1 yer)
+| Satır (yaklaşık) | Önce | Sonra |
+|---|---|---|
+| ~189 | `fetch('http://localhost:3001/api/forward', ...)` | `fetch(config.forwardUrl, ...)` |
+
+#### 5.3.6 `components/WebhookManager.tsx` display string (1 yer ek)
+| Satır | Önce | Sonra |
+|---|---|---|
+| ~358 | Display `http://localhost:3001/api/webhook` | `{config.webhookUrl}` |
+
+Bu dosyaların hepsine `import { config } from '../services/config';` (veya `'../../services/config'` derinliğine göre) eklenecek.
 
 ### 5.4 `components/WebhookManager.tsx` Bug Fix'ler
 
@@ -367,14 +405,59 @@ const handleInject = async (e: React.FormEvent) => {
 
 Mevcut test fonksiyonu secret'sız POST atıyor, artık 401 alacak. `secret`'ı payload'a ekleyerek güncellenir.
 
-### 5.8 Frontend Değişiklik Özeti
+### 5.8 `App.tsx` Entegrasyonu — WebhookManager Render
 
-| Dosya | Değişiklik |
-|---|---|
-| `.env.local` | `VITE_BACKEND_URL` yeni |
-| `services/config.ts` | **Yeni dosya** |
-| `context/SignalContext.tsx` | 4 URL refactor |
-| `components/WebhookManager.tsx` | Bug fix + secret model + handleInject rewrite + testWebhook fix + secret input UI |
+**Mevcut durum:** `WebhookManager` `App.tsx:10`'da import ediliyor **ama hiçbir yerde JSX olarak render edilmiyor** (grep `<WebhookManager` 0 sonuç). Yani şu an kullanıcı UI'ı göremiyor — bug fix'leri ve secret localStorage input'u erişilemez durumda. Bu "dead import"u canlandırmamız gerek.
+
+**Mevcut view mode pattern** (`App.tsx:283-348`): `viewMode` string state'ine göre conditional render:
+```tsx
+{viewMode === 'dashboard' && (...)}
+{viewMode === 'spot-scanner' && <SpotScanner ... />}
+{viewMode === 'lab' && <SystemDiagnostics />}
+{viewMode === 'database' && <DatabaseViewer />}
+// vs.
+```
+
+**Yapılacaklar:**
+
+1. **`context/UserContext.tsx`'te `viewMode` type'ına `'webhook'` ekle** (eğer TypeScript union type ise; yoksa `string` tipindedir, o zaman sadece runtime değer eklemek yeter).
+
+2. **`App.tsx` header nav'a NavLink ekle** — `signals-manager` satırının yakınına (satır ~230):
+```tsx
+<NavLink mode="webhook" label="Webhook" icon={<Terminal size={14} />} />
+```
+`Terminal` ikonu `lucide-react`'ten import edilir (App.tsx'te halihazırda `Settings, Moon, Sun, Hexagon...` ile aynı blokta).
+
+3. **`App.tsx` main render switch'ine WebhookManager ekle** — `{viewMode === 'lab' && <SystemDiagnostics />}` satırının yakınına (satır ~345):
+```tsx
+{viewMode === 'webhook' && <WebhookManager />}
+```
+
+4. **`onManualSignal` prop geçilmiyor** — spec Section 5.6'ya göre bu prop `WebhookManagerProps` interface'inden tamamen kaldırılıyor, component internal POST atıyor.
+
+### 5.9 `WebhookManagerProps` — `onManualSignal` Kaldırılması
+
+`handleInject` backend'e POST atıp socket.io echo'sunu beklediği için `onManualSignal` prop'unun UI güncelleme rolü kalmıyor. Implementation adımı:
+
+1. `WebhookManagerProps` interface'inden `onManualSignal` alanı silinir
+2. Component signature değişir: `({ onManualSignal }) => ` → `() =>`
+3. `App.tsx` içinde `<WebhookManager />` olarak prop'suz render edilir (Section 5.8'deki eklemede)
+4. Grep ile başka çağrım kontrol edilir: `grep -rn "onManualSignal" --include="*.tsx" --include="*.ts"` — WebhookManager.tsx dışında kalan her şey ya temizlenir ya bırakılır (bağımsız başka bir kullanım varsa dokunma)
+
+### 5.10 Frontend Değişiklik Özeti
+
+| Dosya | Değişiklik | Tür |
+|---|---|---|
+| `.env.local` | `VITE_BACKEND_URL` ekle | Yeni |
+| `services/config.ts` | URL constants export (analyzeUrl dahil 6 alan) | **Yeni dosya** |
+| `context/SignalContext.tsx` | 4 URL refactor | Güncelleme |
+| `services/aiService.ts` | 1 URL refactor (`analyzeUrl`) | Güncelleme |
+| `components/SystemDiagnostics.tsx` | 5 URL refactor (4 fetch + 1 display) | Güncelleme |
+| `components/DatabaseViewer.tsx` | 2 URL refactor | Güncelleme |
+| `components/NotificationSettingsPanel.tsx` | 1 URL refactor (`forwardUrl`) | Güncelleme |
+| `components/WebhookManager.tsx` | Bug fix + secret model + secret input UI + handleInject rewrite + testWebhook fix + `onManualSignal` prop kaldırma + display string fix | Büyük güncelleme |
+| `context/UserContext.tsx` | `viewMode` tip union'ına `'webhook'` ekle (eğer union type ise) | Güncelleme |
+| `App.tsx` | NavLink ekle + `viewMode === 'webhook'` render bloğu ekle + `Terminal` icon import | Güncelleme |
 
 ## 6. Deploy & Kurulum (Laptop)
 
