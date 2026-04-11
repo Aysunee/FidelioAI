@@ -14,7 +14,7 @@ import { MobileNav } from './components/MobileNav';
 import { GlobalTicker } from './components/GlobalTicker';
 import { SpotScanner } from './components/SpotScanner';
 import { Portfolio } from './components/Portfolio';
-import { Settings, Moon, Sun, Hexagon, Sparkles, LayoutGrid, Palette, LogOut, Building2, LayoutDashboard, Activity, Wallet, Radar, FlaskConical, Bitcoin, Database, FlaskRound, Users } from 'lucide-react';
+import { Settings, Moon, Sun, Hexagon, Sparkles, LayoutGrid, Palette, LogOut, Building2, LayoutDashboard, Activity, Wallet, Radar, FlaskConical, Bitcoin, Database, FlaskRound, Users, Terminal } from 'lucide-react';
 import { AnomalyRadar } from './components/AnomalyRadar';
 import { FidelioAI } from './components/FidelioAI';
 
@@ -229,6 +229,7 @@ const AppContent: React.FC = () => {
                             <NavLink mode="radar" label={t.radar} icon={<Radar size={14} />} />
                             <NavLink mode="portfolio" label={t.portfolio} />
                             <NavLink mode="signals-manager" label={t.signals} />
+                            <NavLink mode="webhook" label="Webhook" icon={<Terminal size={14} />} />
 
                             <NavLink mode="nexus" label={t.nexus} icon={<Activity size={14} />} />
                             <NavLink mode="fidelio-ai" label={t.fidelioAi} icon={<Sparkles size={14} className={viewMode === 'fidelio-ai' ? 'animate-pulse' : ''} />} />
@@ -346,6 +347,7 @@ const AppContent: React.FC = () => {
 
                         {viewMode === 'lab' && <SystemDiagnostics />}
                         {viewMode === 'database' && <DatabaseViewer />}
+                        {viewMode === 'webhook' && <WebhookManager />}
                         {viewMode === 'nexus' && <NexusDashboard />}
                         {viewMode === 'journal' && <TradeVisionDashboard />}
                         {viewMode === 'user-management' && <UserManagementDashboard />}

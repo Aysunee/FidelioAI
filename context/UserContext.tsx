@@ -3,7 +3,7 @@ import { DEFAULT_WATCHLIST } from '../constants';
 import { Language } from '../utils/translations';
 
 type Theme = 'light' | 'dark' | 'corporate' | 'labs';
-type ViewMode = 'dashboard' | 'funding' | 'signals-manager' | 'lab' | 'spot-scanner' | 'portfolio' | 'fidelio-ai' | 'radar' | 'journal' | 'database' | 'nexus' | 'user-management';
+type ViewMode = 'dashboard' | 'funding' | 'signals-manager' | 'lab' | 'spot-scanner' | 'portfolio' | 'fidelio-ai' | 'radar' | 'journal' | 'database' | 'nexus' | 'user-management' | 'webhook';
 type VisualMode = 'vibrant' | 'minimal';
 
 interface UserContextType {
