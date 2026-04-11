@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Signal, Side } from '../types';
+import { Side } from '../types';
 import { Card } from './ui/Card';
 import { Terminal, Copy, Check, Play, Settings, ShieldAlert, AlertTriangle, Zap, Activity, CheckCircle2, XCircle, Loader2, Send, Sparkles, Code, QrCode, TrendingUp, TrendingDown, BarChart3, Layers, Clock, Radio } from 'lucide-react';
 import { useSignals } from '../context/SignalContext';
-import { API_BASE_URL } from '../utils/config';
+import { API_BASE_URL, WEBHOOK_API_URL } from '../utils/config';
 
-interface WebhookManagerProps {
-    onManualSignal: (signal: Signal) => void;
-}
+// Component is self-contained — reads WEBHOOK_API_URL from config, manages
+// its own secret via localStorage, POSTs directly to the webhook backend.
 
 // Preset Templates
 const WEBHOOK_TEMPLATES = [
@@ -69,7 +68,7 @@ const WEBHOOK_TEMPLATES = [
     }
 ];
 
-export const WebhookManager: React.FC<WebhookManagerProps> = ({ onManualSignal }) => {
+export const WebhookManager: React.FC = () => {
     const { signals } = useSignals();
     const [activeTab, setActiveTab] = useState<'templates' | 'custom' | 'manual'>('templates');
     const [copied, setCopied] = useState(false);
@@ -81,9 +80,23 @@ export const WebhookManager: React.FC<WebhookManagerProps> = ({ onManualSignal }
     // Filter only webhook signals
     const recentWebhookSignals = signals.filter(s => s.source === 'WEBHOOK').slice(0, 5);
 
-    // Local Webhook URL
-    const webhookUrl = `${API_BASE_URL}/api/webhook`;
-    const secret = `sk_live_${Math.random().toString(36).substring(2, 15)}`;
+    // Webhook URL — points at the separate webhook backend (Windows Docker),
+    // NOT the MySQL backend. See utils/config.ts for the two URL constants.
+    const webhookUrl = `${WEBHOOK_API_URL}/api/webhook`;
+    // Secret is user-managed via localStorage (see spec §5.5). User pastes
+    // the value from .env.webhook → WEBHOOK_SECRET into the input UI below.
+    const [secret, setSecret] = useState<string>(() => {
+        return localStorage.getItem('webhook_secret') || '';
+    });
+
+    const handleSecretChange = (newSecret: string) => {
+        setSecret(newSecret);
+        if (newSecret) {
+            localStorage.setItem('webhook_secret', newSecret);
+        } else {
+            localStorage.removeItem('webhook_secret');
+        }
+    };
 
     // Custom Builder State
     const [customSymbol, setCustomSymbol] = useState('{{ticker}}');
@@ -117,9 +130,14 @@ export const WebhookManager: React.FC<WebhookManagerProps> = ({ onManualSignal }
     };
 
     const testWebhook = async () => {
+        if (!secret) {
+            alert('Secret gerekli. Yukarıdaki input\'a backend .env.webhook\'taki WEBHOOK_SECRET değerini yapıştır.');
+            return;
+        }
         setTesting(true);
         try {
-            const testSignal = {
+            const testPayload = {
+                secret,
                 symbol: 'BTCUSDT',
                 side: 'BUY',
                 price: 65000,
@@ -130,17 +148,19 @@ export const WebhookManager: React.FC<WebhookManagerProps> = ({ onManualSignal }
             const response = await fetch(webhookUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(testSignal)
+                body: JSON.stringify(testPayload)
             });
 
             if (response.ok) {
-                alert('✅ Test başarılı! Sinyal dashboard\'a gönderildi.');
+                alert('Test başarılı — sinyal webhook backend\'e gönderildi.');
                 setServerStatus('ONLINE');
+            } else if (response.status === 401) {
+                alert('Secret yanlış — backend .env.webhook\'taki WEBHOOK_SECRET ile eşleşmiyor.');
             } else {
-                alert('⚠️ Sunucu yanıt verdi ama hata oluştu.');
+                alert(`Sunucu hata döndü: ${response.status}`);
             }
         } catch (e) {
-            alert('❌ Bağlantı hatası! Sunucu çalışmıyor olabilir.');
+            alert('Bağlantı hatası — backend çalışıyor mu?');
             setServerStatus('OFFLINE');
         } finally {
             setTesting(false);
@@ -153,14 +173,21 @@ export const WebhookManager: React.FC<WebhookManagerProps> = ({ onManualSignal }
         setTimeout(() => setCopied(false), 2000);
     };
 
-    const handleInject = (e: React.FormEvent) => {
+    const handleInject = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!manualSymbol || !manualPrice) return;
+        if (!secret) {
+            alert('Secret gerekli. Yukarıdaki input\'a backend .env.webhook\'taki WEBHOOK_SECRET değerini yapıştır.');
+            return;
+        }
 
-        const signal: Signal = {
+        const payload = {
+            secret,
             id: `man_${Date.now()}`,
             strategy: manualStrategy,
-            symbol: manualSymbol.toUpperCase().includes('USDT') ? manualSymbol.toUpperCase() : `${manualSymbol.toUpperCase()}USDT`,
+            symbol: manualSymbol.toUpperCase().includes('USDT')
+                ? manualSymbol.toUpperCase()
+                : `${manualSymbol.toUpperCase()}USDT`,
             side: manualSide,
             price: parseFloat(manualPrice),
             time: new Date().toISOString(),
@@ -169,9 +196,28 @@ export const WebhookManager: React.FC<WebhookManagerProps> = ({ onManualSignal }
             confidence: 0.99
         };
 
-        onManualSignal(signal);
-        setManualSymbol('');
-        setManualPrice('');
+        try {
+            const res = await fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (res.ok) {
+                setManualSymbol('');
+                setManualPrice('');
+                // Signal is persisted server-side; no local state push needed.
+                // Real-time socket.io echo for webhook backend will be added in
+                // a later task (currently "Recent Webhook Signals" section
+                // only shows signals from the existing MySQL backend via
+                // useSignals() — acceptable for the first MVP iteration).
+            } else if (res.status === 401) {
+                alert('Secret yanlış — backend .env.webhook\'taki WEBHOOK_SECRET ile eşleşmiyor.');
+            } else {
+                alert(`Hata: ${res.status}`);
+            }
+        } catch (err) {
+            alert('Bağlantı hatası — backend çalışıyor mu?');
+        }
     };
 
     const generateTemplateJSON = (templateId: string) => {
@@ -258,6 +304,27 @@ export const WebhookManager: React.FC<WebhookManagerProps> = ({ onManualSignal }
             </div>
 
             <div className="max-w-7xl mx-auto relative z-10">
+                {/* Secret Input — spec §5.5 */}
+                <div className="backdrop-blur-xl bg-white/5 border border-white/10 rounded-lg p-4 mb-6">
+                    <label className="text-xs text-gray-400 flex items-center gap-2 font-medium mb-2">
+                        <ShieldAlert size={12} />
+                        Webhook Secret — backend .env.webhook → WEBHOOK_SECRET
+                    </label>
+                    <input
+                        type="password"
+                        value={secret}
+                        onChange={e => handleSecretChange(e.target.value)}
+                        placeholder="Paste the WEBHOOK_SECRET from .env.webhook"
+                        autoComplete="off"
+                        className="w-full bg-black/30 border border-white/10 rounded-md px-3 py-2 text-sm text-gray-200 font-mono focus:border-purple-500/50 focus:outline-none"
+                    />
+                    {!secret && (
+                        <p className="text-xs text-amber-400 mt-2">
+                            Enter the secret to enable Test Connection, Manual Inject, and template generation.
+                        </p>
+                    )}
+                </div>
+
                 {/* Tabs */}
                 <div className="flex space-x-2 backdrop-blur-xl bg-white/5 p-1.5 rounded-lg w-fit border border-white/10 mb-6">
                     <button
