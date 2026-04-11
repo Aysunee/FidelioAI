@@ -1,0 +1,21 @@
+# Caddyfile — Webhook backend HTTPS reverse proxy
+# Spec: docs/superpowers/specs/2026-04-11-webhook-connection-design-amendment-01.md §B.4
+
+gumruc.com, www.gumruc.com {
+    reverse_proxy backend:3001
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output file /data/log/gumruc.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        format json
+    }
+}

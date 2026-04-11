@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fidelio_webhook_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fidelio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: fidelio_signals
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+      - ./server/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fidelio -d fidelio_signals"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # No external port — only reachable within compose network
+
+  backend:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: fidelio_webhook_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./.env.webhook:/app/.env.webhook:ro
+    environment:
+      # DATABASE_URL uses compose DNS — overrides .env.webhook value
+      DATABASE_URL: postgres://fidelio:${POSTGRES_PASSWORD}@postgres:5432/fidelio_signals
+      BIND_HOST: 0.0.0.0
+      PORT: 3001
+    # No external port — caddy reverse-proxies through compose network
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: fidelio_webhook_caddy
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
