@@ -1,3 +1,17 @@
+# Fidelio webhook stack — 3 services, compose-isolated network.
+#
+# Start:    docker compose --env-file .env.webhook up -d
+# Stop:     docker compose down
+# Logs:     docker compose logs -f
+#
+# The `--env-file .env.webhook` flag is REQUIRED on every compose command
+# — it feeds POSTGRES_PASSWORD (and any other ${VAR}) into compose's
+# variable interpolation. Without it, ${POSTGRES_PASSWORD} resolves to
+# empty and postgres fails to start.
+#
+# .env.webhook is also volume-mounted into the backend container at
+# runtime for the Node --env-file loader.
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -29,7 +43,11 @@ services:
     volumes:
       - ./.env.webhook:/app/.env.webhook:ro
     environment:
-      # DATABASE_URL uses compose DNS — overrides .env.webhook value
+      # DATABASE_URL is AUTHORITATIVE here. The value in .env.webhook is
+      # silently ignored at runtime because Node's --env-file loader does
+      # NOT override env vars that are already set by compose. If you need
+      # to change the database connection string, edit it on this line
+      # (not in .env.webhook).
       DATABASE_URL: postgres://fidelio:${POSTGRES_PASSWORD}@postgres:5432/fidelio_signals
       BIND_HOST: 0.0.0.0
       PORT: 3001
@@ -40,7 +58,10 @@ services:
     container_name: fidelio_webhook_caddy
     restart: unless-stopped
     depends_on:
-      - backend
+      # Wait for backend to report healthy (HEALTHCHECK in server/Dockerfile
+      # hits /health). Prevents Caddy returning 502s during slow boot.
+      backend:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"

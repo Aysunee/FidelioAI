@@ -32,4 +32,5 @@ server/signals.json
 
 # Webhook connection work
 .env
+.env.webhook
 postgres_data/
