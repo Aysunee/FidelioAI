@@ -81,6 +81,10 @@ async function saveSignal(signal) {
 const app = express();
 const server = http.createServer(app);
 
+// Caddy is our immediate reverse proxy. Trust its X-Forwarded-For header so
+// req.ip reports the real client IP (used by rate limiter keying + audit logs).
+app.set('trust proxy', 1);
+
 app.use(cors({
     origin: (origin, callback) => {
         // Server-to-server requests (TradingView, curl) have no Origin header
@@ -125,13 +129,29 @@ app.get('/health', async (req, res) => {
         await pool.query('SELECT 1');
         res.status(200).json({ status: 'ok', uptime: process.uptime() });
     } catch (e) {
-        res.status(500).json({ status: 'degraded', error: e.message });
+        // Log full error server-side, but do NOT echo DB internals (hostnames,
+        // user, database name) to an unauthenticated public endpoint.
+        console.error('[health] db query failed:', e);
+        res.status(500).json({ status: 'degraded', error: 'database unreachable' });
     }
 });
 
 app.get('/api/webhook/signals', async (req, res) => {
+    // Endpoint returns full signal history — gate it behind the same
+    // WEBHOOK_SECRET as POST. Frontend sends the secret via X-Webhook-Secret
+    // header (pulled from localStorage). TradingView never hits this endpoint.
+    if (!WEBHOOK_SECRET) {
+        return res.status(500).json({ error: 'Server misconfigured: WEBHOOK_SECRET not set' });
+    }
+    const providedSecret = req.header('X-Webhook-Secret');
+    if (providedSecret !== WEBHOOK_SECRET) {
+        console.warn('[signals] Rejected - invalid or missing X-Webhook-Secret from', req.ip);
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+
     const requested = parseInt(req.query.limit || '500', 10);
-    const limit = Math.min(Math.max(requested, 1), 5000);
+    const safeRequested = Number.isFinite(requested) ? requested : 500;
+    const limit = Math.min(Math.max(safeRequested, 1), 5000);
     const signals = await loadSignals(limit);
     res.json(signals);
 });
@@ -172,6 +192,9 @@ app.post('/api/webhook', webhookLimiter, async (req, res) => {
     if (!Number.isFinite(signal.price)) {
         return res.status(400).json({ error: `Invalid price: ${data.price}` });
     }
+    if (!Number.isFinite(signal.confidence)) {
+        return res.status(400).json({ error: `Invalid confidence: ${data.confidence}` });
+    }
 
     const saved = await saveSignal(signal);
     if (!saved) {
@@ -204,12 +227,17 @@ server.listen(PORT, BIND_HOST, () => {
     console.log(`🔌 Socket.IO path:     /webhook-ws`);
 });
 
-// Graceful shutdown
+// Graceful shutdown — close http server first (drains in-flight requests),
+// then drain the pg pool, then exit. Without the Promise wrap around
+// server.close(), process.exit fires before existing connections finish.
 const shutdown = async (signal) => {
     console.log(`[boot] ${signal} received, shutting down...`);
-    server.close(() => {
+    try {
+        await new Promise((resolve) => server.close(resolve));
         console.log('[boot] http server closed');
-    });
+    } catch (e) {
+        console.error('[boot] http server close error:', e);
+    }
     try {
         await pool.end();
         console.log('[boot] pg pool drained');
