@@ -1,6 +1,34 @@
 # Caddyfile — Webhook backend HTTPS reverse proxy
 # Spec: docs/superpowers/specs/2026-04-11-webhook-connection-design-amendment-01.md §B.4
 
+# ============================================================================
+# STAGING ACME (active on first run — remove before going to production)
+# ----------------------------------------------------------------------------
+# Let's Encrypt staging CA is used initially because it has much higher rate
+# limits (~30,000 certs/IP/hour vs prod's 5 failures/account/hostname/hour).
+# This prevents getting locked out of the prod CA if DNS / port forward /
+# firewall isn't quite right on the first try.
+#
+# Staging-issued certs are NOT trusted by browsers/TradingView — you'll see
+# a certificate warning on curl and browser. That's expected during testing.
+#
+# Once staging cert is successfully obtained AND the full path is verified
+# (DNS resolves → port 80/443 reachable from internet → ACME challenge
+# completes → reverse_proxy hits backend), switch to production by:
+#
+#   1. Comment out or delete the `acme_ca` line in the global block below
+#   2. Stop caddy:            docker compose stop caddy
+#   3. Delete staging state:  docker volume rm fidelioai_caddy_data
+#      (or whatever volume name docker compose chose — check
+#      `docker volume ls | grep caddy_data`)
+#   4. Start caddy:           docker compose --env-file .env.webhook up -d caddy
+#   5. Watch logs:            docker logs -f fidelio_webhook_caddy
+#      You should see a real Let's Encrypt cert being obtained within ~20s.
+# ============================================================================
+{
+    acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
 gumruc.com, www.gumruc.com {
     reverse_proxy backend:3001
 

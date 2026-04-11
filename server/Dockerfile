@@ -5,7 +5,14 @@ FROM node:20.19-alpine
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY server/ ./server/
+
+# Selective copy — only the files webhook.cjs actually needs at runtime.
+# Explicitly excludes Hostinger MySQL legacy: index.cjs, db.cjs, schema.sql,
+# signals_db.json (~330k lines), signals.json, users_db.json. These belong to
+# the production MySQL backend and must not be shipped in the webhook image.
+COPY server/webhook.cjs ./server/webhook.cjs
+COPY server/migrations/ ./server/migrations/
+
 USER node
 EXPOSE 3001
 
