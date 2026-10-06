@@ -50,6 +50,12 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
+    // Hostinger's MySQL closes connections idle for ~20 s: drop idle pooled connections before that happens
+    // so a request never picks up a connection the server already closed.
+    maxIdle: 5,
+    idleTimeout: 15000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10000,
     // Never expand JS objects into `col` = value SQL fragments (defence against type-confused input).
     stringifyObjects: true,
     ssl: buildSslConfig()
