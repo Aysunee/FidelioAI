@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS trade_history (
 --   'cooldowns' : per-symbol cooldown stamps of the three engines (written at most every 10 s, reloaded on start
 --                 so that a restart does not re-announce a signal)
 --   'boots'     : the last 50 process start times (ms), to see whether the host keeps the process alive
+--   'leader'    : the engine leader's live status (heartbeat every 5 s), read by standby processes for GET /api/engine/status
+--   'signals_deleted', 'signals_cleared_at' : deletions (last 200 {id, at}) and the last "delete all" (ms), relayed
+--                 to the browsers of the other Node processes
 CREATE TABLE IF NOT EXISTS engine_state (
     k VARCHAR(64) PRIMARY KEY,
     v LONGTEXT,

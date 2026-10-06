@@ -21,10 +21,14 @@ export interface EngineActiveFunding {
     peakF8?: number; // most negative level of the episode (fraction), when the server sends it
 }
 
+export type EngineProcessRole = 'leader' | 'standby' | 'off';
+
 export interface EngineStatus {
     mode: 'server' | 'off';                 // env ENGINE_MODE; 'off' = engine disabled
-    running: boolean;                       // this process holds the engine lock and the loop is active
-    role: 'leader' | 'standby' | 'off';     // standby = another process holds the MySQL lock
+    running: boolean;                       // the engine loop of the lock holder is active
+    // 'leader' also when a standby process answered with the leader's fresh heartbeat (servedBy 'standby');
+    // 'standby' = no running leader is known (see leaderStale)
+    role: EngineProcessRole;
     startedAt: number | null;
     uptimeSec: number;
     processStartedAt: number;
@@ -36,6 +40,10 @@ export interface EngineStatus {
     activeFunding: EngineActiveFunding[];
     telegram: { server: boolean };          // the server sends engine signals to Telegram itself
     signalsToday: number;                   // engine signals since 00:00 UTC
+    // The host runs several Node processes; any of them may answer.
+    servedBy: EngineProcessRole | null;     // role of the answering process (null: older server)
+    leaderHeartbeatAt: number | null;       // last heartbeat of the leader process (ms)
+    leaderStale: boolean;                   // standby answered and the leader's heartbeat is older than 20 s (or missing)
 }
 
 export const ENGINE_STREAM_KEYS: readonly EngineStreamKey[] = ['spotMini', 'spotHour', 'futuresMark', 'futuresMini'];
@@ -116,7 +124,10 @@ export const normalizeEngineStatus = (raw: unknown): EngineStatus => {
         settings: sanitizeSignalSettings(raw.settings),
         activeFunding: toActiveFunding(raw.activeFunding),
         telegram: { server: telegram.server === true },
-        signalsToday: Math.max(0, finiteOr(raw.signalsToday, 0))
+        signalsToday: Math.max(0, finiteOr(raw.signalsToday, 0)),
+        servedBy: raw.servedBy === 'leader' || raw.servedBy === 'standby' || raw.servedBy === 'off' ? raw.servedBy : null,
+        leaderHeartbeatAt: finiteOr(raw.leaderHeartbeatAt, null),
+        leaderStale: raw.leaderStale === true
     };
 };
 
@@ -214,6 +225,12 @@ export const describeEngineHealth = (
         return { tone: 'danger', text: 'Sinyal motoru kapalı (sunucuda ENGINE_MODE=off)' };
     }
     if (status.role === 'standby') {
+        if (status.leaderStale) {
+            const beat = status.leaderHeartbeatAt !== null
+                ? `son kalp atışı ${formatEngineAgo(status.leaderHeartbeatAt, now)}`
+                : 'kalp atışı hiç alınmadı';
+            return { tone: 'warning', text: `Sinyal motorundan haber yok: motoru çalıştıran sunucu süreci yanıt vermiyor (${beat})` };
+        }
         return { tone: 'warning', text: 'Sinyal motoru beklemede: motoru başka bir sunucu süreci çalıştırıyor' };
     }
     if (!status.running) {
@@ -221,7 +238,11 @@ export const describeEngineHealth = (
     }
     const uptime = formatEngineDuration(engineUptimeSec(status, receivedAt, now));
     const scan = formatEngineAgo(latestEngineScan(status), now);
-    const summary = `çalışma süresi ${uptime} · son tarama ${scan} · bugün ${status.signalsToday} sinyal`;
+    // Answered by another process from the leader's heartbeat: say how fresh that is.
+    const beat = status.servedBy === 'standby' && status.leaderHeartbeatAt !== null
+        ? ` · son kalp atışı ${formatEngineAgo(status.leaderHeartbeatAt, now)}`
+        : '';
+    const summary = `çalışma süresi ${uptime} · son tarama ${scan} · bugün ${status.signalsToday} sinyal${beat}`;
     const problems = engineStreamProblems(status);
     if (problems.length > 0) {
         return { tone: 'warning', text: `Sinyal motoru çalışıyor, veri akışında sorun var: ${problems.join(', ')} · ${summary}` };

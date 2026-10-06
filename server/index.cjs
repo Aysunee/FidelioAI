@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
 const express = require('express');
 const http = require('http');
@@ -481,6 +482,8 @@ const createAndBroadcastSignal = async (value) => {
         source: value.source,
         confidence: value.confidence
     };
+    // Marked before the insert: this process's relay must never send it a second time (see SIGNAL RELAY).
+    rememberRelayedSignal(signal.id, now);
     await insertSignal(signal, now);
     io.emit('new_signal', signal);
     return signal;
@@ -665,16 +668,22 @@ app.delete('/api/signals/:id', authenticateToken, requireAdmin, async (req, res)
         return res.status(404).json({ error: 'Sinyal bulunamadı.' });
     }
     await deleteSignalMeta(req.params.id);
+    noteSignalDeleted(req.params.id);
     io.emit('signal_deleted', { id: req.params.id });
+    await recordDeleteTombstone(req.params.id); // browsers of the other processes (see SIGNAL RELAY)
     res.json({ success: true });
 });
 
 // Delete all signals (admin only)
 app.delete('/api/signals', authenticateToken, requireAdmin, async (req, res) => {
+    // Taken before the DELETE: signals stored after this instant survive it (the relay sends them again).
+    const clearedAt = Date.now();
     const [result] = await db.query('DELETE FROM signals');
     await deleteSignalMeta(null);
     recentWebhookSignals.clear();
+    noteSignalsCleared(clearedAt);
     io.emit('signals_cleared');
+    await recordClearTombstone(clearedAt);
     console.log(`[signals] Tüm sinyaller silindi (${result.affectedRows || 0} kayıt, kullanıcı: ${req.user.username})`);
     res.json({ success: true, deleted: result.affectedRows || 0 });
 });
@@ -1322,7 +1331,9 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 //    The lock lives on a dedicated connection that is never returned to the pool; other processes
 //    (a second instance, or the old process during a redeploy) stay 'standby' and retry every 60 s.
 //  - engine_state holds 'settings' (global, admin-editable), 'cooldowns' (written at most every 10 s,
-//    reloaded on start so that a restart does not re-announce) and 'boots' (last 50 process starts).
+//    reloaded on start so that a restart does not re-announce), 'boots' (last 50 process starts) and
+//    'leader' (the leader's live status, written every 5 s with the lock check: standby processes answer
+//    GET /api/engine/status with it, because the host runs several processes and a browser reaches any one).
 //  - Without the tables (no CREATE privilege) everything keeps working with in-memory state.
 
 const PROCESS_STARTED_AT = Date.now();
@@ -1339,6 +1350,11 @@ const ENGINE_KINDS = ['MOMENTUM', 'VOLUME', 'FUNDING'];
 const ENGINE_STREAM_KEYS = ['spotMini', 'spotHour', 'futuresMark', 'futuresMini'];
 const SIGNALS_TODAY_CACHE_MS = 15 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// A standby reports the leader as running only while its heartbeat is at most 20 s old; it re-reads the
+// heartbeat at most every 3 s.
+const LEADER_HEARTBEAT_STALE_MS = 20 * 1000;
+const LEADER_HEARTBEAT_CACHE_MS = 3 * 1000;
+const LEADER_HEARTBEAT_COUNT_WAIT_MS = 3 * 1000; // the heartbeat waits at most this long for today's signal count
 
 const parseEngineMode = (raw) => {
     const value = String(raw === undefined || raw === null ? '' : raw).trim().toLowerCase();
@@ -1367,14 +1383,15 @@ const engineLog = {
     error: (message) => console.error(message)
 };
 
-// The same failure (e.g. DB down) is logged at most every 5 minutes.
+// The same failure (e.g. DB down) is logged at most once per interval (engine: 5 minutes).
 const engineWarnedAt = new Map();
-const engineWarn = (key, ...args) => {
+const warnThrottled = (key, intervalMs, ...args) => {
     const now = Date.now();
-    if (now - (engineWarnedAt.get(key) || 0) < 5 * 60 * 1000) return;
+    if (now - (engineWarnedAt.get(key) || 0) < intervalMs) return;
     engineWarnedAt.set(key, now);
     console.warn(...args);
 };
+const engineWarn = (key, ...args) => warnThrottled(key, 5 * 60 * 1000, ...args);
 
 const unrefTimer = (timer) => {
     if (timer && typeof timer.unref === 'function') timer.unref();
@@ -1431,7 +1448,11 @@ const engineHost = {
     settingsSeq: 0,    // bumped by every settings change of this process (PUT); see refreshSharedState
     standbyLogged: false,
     today: { day: 0, count: 0 },          // engine signals published by THIS process since 00:00 UTC
-    todayCache: { day: 0, at: 0, value: 0 } // DB count (all processes), cached briefly
+    todayCache: { day: 0, at: 0, value: 0 }, // DB count (all processes), cached briefly
+    todayCounting: false,    // a COUNT for todayCache is in flight
+    heartbeatAt: 0,          // last heartbeat this process stored as leader
+    heartbeatPromise: null,  // heartbeat write in flight (never two at once)
+    leaderBeat: { value: null, at: 0, pending: null } // standby: the leader's heartbeat, read at most every 3 s
 };
 
 // --- engine_state / signal_meta ---
@@ -1604,6 +1625,8 @@ const countEngineSignal = (at) => {
 };
 
 // Same rule as webhook / manual signals: stored first, broadcast only after the row is safely stored.
+// signal_meta is written BEFORE the signals row: the relay of another process (and GET /api/signals) must
+// never see the row without its engine / magnitude. A meta row left behind by a failed insert is harmless.
 const publishEngineSignal = async (draft) => {
     if (!isPlainObject(draft) || !ENGINE_KINDS.includes(draft.engine) || !ENGINE_SIGNAL_SOURCES.includes(draft.source)) {
         engineWarn('bad-signal', '[engine] Geçersiz motor sinyali atlandı.');
@@ -1626,18 +1649,26 @@ const publishEngineSignal = async (draft) => {
         source: draft.source,
         confidence: null // engines never write a confidence; the measured size is in magnitude
     };
-    await insertSignal(signal, at);
+    rememberRelayedSignal(signal.id, at); // this process emits it itself: its relay must skip it
 
     const magnitude = cleanMagnitude(draft.magnitude);
+    let metaStored = false;
     if (engineHost.metaTable !== false) {
         try {
             await db.query(
                 'INSERT INTO signal_meta (signal_id, engine, magnitude) VALUES (?, ?, ?)',
                 [signal.id, draft.engine, magnitude ? JSON.stringify(magnitude) : null]
             );
+            metaStored = true;
         } catch (err) {
             engineWarn('meta-insert', '[engine] Sinyalin motor/ölçüm bilgisi kaydedilemedi:', err.code || err.message);
         }
+    }
+    try {
+        await insertSignal(signal, at);
+    } catch (err) {
+        if (metaStored) await deleteSignalMeta(signal.id);
+        throw err;
     }
 
     const dto = { ...toSignalDto(signal), engine: draft.engine };
@@ -1701,14 +1732,25 @@ const deleteSignalMeta = async (id) => {
     }
 };
 
+// The last known count (DB count of today, or this process's own count): never waits for the DB.
+const knownSignalsToday = () => {
+    const day = utcDayStart(Date.now());
+    const local = engineHost.today.day === day ? engineHost.today.count : 0;
+    const cache = engineHost.todayCache;
+    return Math.max(cache.day === day ? cache.value : 0, local);
+};
+
 // Engine signals since 00:00 UTC: counted in the DB (covers every process and restart), cached for 15 s;
-// this process's own count is the fallback.
+// this process's own count is the fallback. One COUNT at a time: while one is in flight (or hung), other
+// callers get the last known count at once instead of queueing another query.
 const countSignalsToday = async () => {
     const now = Date.now();
     const day = utcDayStart(now);
     const local = engineHost.today.day === day ? engineHost.today.count : 0;
     const cache = engineHost.todayCache;
     if (cache.day === day && now - cache.at < SIGNALS_TODAY_CACHE_MS) return Math.max(cache.value, local);
+    if (engineHost.todayCounting) return knownSignalsToday();
+    engineHost.todayCounting = true;
     let value = local;
     try {
         const useTimeMs = await hasSignalsTimeMs();
@@ -1719,6 +1761,8 @@ const countSignalsToday = async () => {
         value = Number(rows && rows[0] && rows[0].total) || 0;
     } catch (err) {
         engineWarn('today', '[engine] Bugünkü sinyal sayısı okunamadı:', err.code || err.message);
+    } finally {
+        engineHost.todayCounting = false;
     }
     engineHost.todayCache = { day, at: now, value };
     return Math.max(value, local);
@@ -1831,6 +1875,7 @@ const stepDown = () => {
 };
 
 // Every 5 s: the query keeps the dedicated connection alive (idle cut-off) and proves we still hold the lock.
+// While the lock is held, the leader also stores its heartbeat (engine_state 'leader', one small UPSERT).
 const checkEngineLock = async () => {
     if (engineHost.role !== 'leader' || engineHost.shuttingDown) return;
     const conn = engineHost.lockConn;
@@ -1852,6 +1897,7 @@ const checkEngineLock = async () => {
     }
     if (engineHost.role !== 'leader' || engineHost.shuttingDown || engineHost.lockConn !== conn) return;
     if (held) {
+        sendLeaderHeartbeat();
         scheduleLockCheck();
         return;
     }
@@ -1896,6 +1942,7 @@ const becomeLeader = async () => {
     engineHost.engine = engine;
     engineHost.cooldowns = engine.getCooldowns();
     console.log('[engine] Motor kilidi alındı: sinyal motoru bu süreçte çalışıyor.');
+    sendLeaderHeartbeat(); // standby processes see the new leader at once, not only after the first check
     scheduleLockCheck();
 };
 
@@ -1963,11 +2010,13 @@ const startEngineHost = async () => {
     await tryBecomeLeader();
 };
 
-// SIGTERM / SIGINT: final cooldown write, stop the engine, release the lock (a standby process takes it
-// at its next attempt, within 60 s).
+// SIGTERM / SIGINT: stop the signal relay, final cooldown write, stop the engine, mark the heartbeat as
+// stopped (standby processes report it at once instead of after 20 s), release the lock (a standby process
+// takes it at its next attempt, within 60 s).
 const shutdownEngineHost = async () => {
     if (engineHost.shuttingDown) return;
     engineHost.shuttingDown = true;
+    stopSignalRelay();
     for (const key of ['lockTimer', 'lockCheckTimer']) {
         if (engineHost[key]) clearTimeout(engineHost[key]);
         engineHost[key] = null;
@@ -1982,36 +2031,182 @@ const shutdownEngineHost = async () => {
         if (wasLeader) engineHost.pendingCooldowns = engineHost.engine.getCooldowns();
     }
     if (wasLeader) await flushCooldowns();
+    if (wasLeader) await markLeaderStopped();
     await releaseEngineLock();
     engineHost.role = 'off';
 };
 
 const zeroEngineStat = () => ({ matching: 0, universe: 0 });
+const idleEngineStats = () => ({ momentum: zeroEngineStat(), volume: zeroEngineStat(), funding: zeroEngineStat(), updatedAt: 0 });
 
-const buildEngineStatus = async () => {
+// This process's own engine view: the leader answers GET /api/engine/status with it and stores it as its heartbeat.
+const localEngineView = () => {
     const snap = engineHost.engine ? engineHost.engine.getStatus() : null;
     const running = engineHost.role === 'leader' && !!snap && snap.running;
     const streams = {};
     for (const key of ENGINE_STREAM_KEYS) streams[key] = running && snap.streams[key] ? snap.streams[key] : 'down';
     return {
-        mode: ENGINE_MODE,
         running,
-        role: engineHost.role,
         startedAt: running ? snap.startedAt : null,
         uptimeSec: Math.floor(process.uptime()),
         processStartedAt: PROCESS_STARTED_AT,
-        boots: engineHost.boots.slice(-ENGINE_BOOTS_KEEP),
         streams,
         lastScan: snap ? { ...snap.lastScan } : { momentum: null, volume: null, funding: null },
-        stats: running
-            ? snap.stats
-            : { momentum: zeroEngineStat(), volume: zeroEngineStat(), funding: zeroEngineStat(), updatedAt: 0 },
-        settings: engineHost.settings,
+        stats: running ? snap.stats : idleEngineStats(),
         activeFunding: running
             ? snap.activeFunding.map(entry => ({ symbol: entry.symbol, f8: entry.f8Pct / 100, since: entry.since }))
             : [],
-        telegram: { server: !!(engineTelegram && engineTelegram.enabled) },
-        signalsToday: await countSignalsToday()
+        telegram: { server: !!(engineTelegram && engineTelegram.enabled) }
+    };
+};
+
+// --- Leader heartbeat (engine_state 'leader') ---
+// { processStartedAt, pid, hostname, heartbeatAt, running, startedAt, uptimeSec, streams, lastScan, stats,
+//   activeFunding, telegram, signalsToday } (+ stoppedAt after a graceful shutdown). pid / hostname are for
+// diagnostics in the table only; the API never returns them.
+const buildLeaderHeartbeat = (signalsToday) => ({
+    ...localEngineView(),
+    pid: process.pid,
+    hostname: os.hostname(),
+    heartbeatAt: Date.now(),
+    signalsToday
+});
+
+// Fire and forget, at most one write in flight; a failure is logged once per minute (standby processes then
+// report the leader as stale after 20 s, which is the truth seen from outside).
+const sendLeaderHeartbeat = () => {
+    if (engineHost.role !== 'leader' || engineHost.shuttingDown || engineHost.stateTable !== true || engineHost.heartbeatPromise) return;
+    engineHost.heartbeatPromise = (async () => {
+        try {
+            // DB count (cached 15 s); a slow or hung COUNT never holds the heartbeat back
+            const signalsToday = await withTimeout(countSignalsToday(), LEADER_HEARTBEAT_COUNT_WAIT_MS, 'günlük sinyal sayısı')
+                .catch(() => knownSignalsToday());
+            if (engineHost.role !== 'leader' || engineHost.shuttingDown) return;
+            const heartbeat = buildLeaderHeartbeat(signalsToday);
+            await withTimeout(writeEngineState('leader', heartbeat), ENGINE_LOCK_QUERY_TIMEOUT_MS, 'kalp atışı');
+            engineHost.heartbeatAt = heartbeat.heartbeatAt;
+        } catch (err) {
+            warnThrottled('heartbeat', 60 * 1000, '[engine] Lider kalp atışı kaydedilemedi:', err.code || err.message);
+        } finally {
+            engineHost.heartbeatPromise = null;
+        }
+    })();
+};
+
+// Graceful shutdown of the leader: still holding the lock, so no other leader can have written meanwhile.
+// A heartbeat write in flight is waited for briefly (it must not land after stoppedAt); exitGracefully ends the
+// process 5 s after SIGTERM, so a hung one is not waited for (RELEASE_LOCK must still run).
+const markLeaderStopped = async () => {
+    if (engineHost.stateTable !== true) return;
+    if (engineHost.heartbeatPromise) await withTimeout(engineHost.heartbeatPromise, 1000, 'kalp atışı').catch(() => { /* hung */ });
+    try {
+        const heartbeat = { ...buildLeaderHeartbeat(null), stoppedAt: Date.now() };
+        await withTimeout(writeEngineState('leader', heartbeat), 2000, 'kalp atışı');
+    } catch { /* the heartbeat turns stale after 20 s anyway */ }
+};
+
+const finiteOrNull = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+
+// The stored heartbeat, defensively reshaped to the status fields (null when missing / malformed).
+const parseLeaderHeartbeat = (raw) => {
+    if (!isPlainObject(raw)) return null;
+    const heartbeatAt = finiteOrNull(raw.heartbeatAt);
+    if (heartbeatAt === null || heartbeatAt <= 0) return null;
+    const rawStreams = isPlainObject(raw.streams) ? raw.streams : {};
+    const streams = {};
+    for (const key of ENGINE_STREAM_KEYS) streams[key] = ['connected', 'connecting'].includes(rawStreams[key]) ? rawStreams[key] : 'down';
+    const rawScan = isPlainObject(raw.lastScan) ? raw.lastScan : {};
+    const rawStats = isPlainObject(raw.stats) ? raw.stats : {};
+    const stat = (s) => (isPlainObject(s)
+        ? { matching: finiteOrNull(s.matching) || 0, universe: finiteOrNull(s.universe) || 0 }
+        : zeroEngineStat());
+    return {
+        heartbeatAt,
+        stoppedAt: finiteOrNull(raw.stoppedAt),
+        running: raw.running === true,
+        startedAt: finiteOrNull(raw.startedAt),
+        uptimeSec: Math.max(0, finiteOrNull(raw.uptimeSec) || 0),
+        processStartedAt: finiteOrNull(raw.processStartedAt) || 0,
+        streams,
+        lastScan: { momentum: finiteOrNull(rawScan.momentum), volume: finiteOrNull(rawScan.volume), funding: finiteOrNull(rawScan.funding) },
+        stats: { momentum: stat(rawStats.momentum), volume: stat(rawStats.volume), funding: stat(rawStats.funding), updatedAt: finiteOrNull(rawStats.updatedAt) || 0 },
+        activeFunding: Array.isArray(raw.activeFunding)
+            ? raw.activeFunding.filter(e => isPlainObject(e) && typeof e.symbol === 'string').slice(0, 500)
+                .map(e => ({ symbol: e.symbol, f8: finiteOrNull(e.f8), since: finiteOrNull(e.since) }))
+            : [],
+        telegram: { server: isPlainObject(raw.telegram) && raw.telegram.server === true },
+        signalsToday: finiteOrNull(raw.signalsToday)
+    };
+};
+
+// Standby: the leader's heartbeat, read at most every 3 s (concurrent requests share one read). A failed read
+// keeps the previous value, which turns stale on its own.
+const readLeaderHeartbeat = async () => {
+    if (engineHost.stateTable !== true) return null;
+    const cache = engineHost.leaderBeat;
+    if (cache.at > 0 && Date.now() - cache.at <= LEADER_HEARTBEAT_CACHE_MS) return cache.value;
+    if (!cache.pending) {
+        cache.pending = withTimeout(readEngineState('leader'), ENGINE_LOCK_QUERY_TIMEOUT_MS, 'lider durumu')
+            .then((raw) => {
+                cache.value = parseLeaderHeartbeat(raw);
+                cache.at = Date.now();
+            })
+            .catch(err => warnThrottled('leader-read', 60 * 1000, '[engine] Lider süreç durumu okunamadı:', err.code || err.message))
+            .finally(() => { cache.pending = null; });
+    }
+    await cache.pending;
+    return cache.value;
+};
+
+// Leader: its own memory. Standby: the leader's heartbeat (role 'leader' while it is at most 20 s old; else
+// 'standby' + running false + leaderStale). Same shape for both, plus servedBy / leaderHeartbeatAt / leaderStale.
+const buildEngineStatus = async () => {
+    const own = localEngineView();
+    const servedBy = engineHost.role; // taken before any await: the role may change during an election
+    let view = own;
+    let role = servedBy;
+    let signalsToday = null;
+    let leaderHeartbeatAt = null;
+    let leaderStale = false;
+    if (servedBy === 'leader') {
+        leaderHeartbeatAt = engineHost.heartbeatAt || null;
+    } else if (servedBy === 'standby') {
+        const beat = await readLeaderHeartbeat();
+        const now = Date.now();
+        const fresh = !!beat && beat.stoppedAt === null && now - beat.heartbeatAt <= LEADER_HEARTBEAT_STALE_MS;
+        leaderHeartbeatAt = beat ? beat.heartbeatAt : null;
+        leaderStale = !fresh;
+        if (fresh) {
+            role = 'leader';
+            view = {
+                ...beat,
+                startedAt: beat.running ? beat.startedAt : null,
+                uptimeSec: beat.uptimeSec + Math.max(0, Math.floor((now - beat.heartbeatAt) / 1000))
+            };
+            if (beat.signalsToday !== null && utcDayStart(beat.heartbeatAt) === utcDayStart(now)) signalsToday = beat.signalsToday;
+        } else if (beat) {
+            view = { ...own, lastScan: beat.lastScan }; // when the leader last scanned
+        }
+    }
+    const running = view.running;
+    return {
+        mode: ENGINE_MODE,
+        running,
+        role,
+        startedAt: running ? view.startedAt : null,
+        uptimeSec: view.uptimeSec,
+        processStartedAt: view.processStartedAt,
+        boots: engineHost.boots.slice(-ENGINE_BOOTS_KEEP),
+        streams: running ? view.streams : own.streams,
+        lastScan: view.lastScan,
+        stats: running ? view.stats : idleEngineStats(),
+        settings: engineHost.settings,
+        activeFunding: running ? view.activeFunding : [],
+        telegram: view.telegram,
+        signalsToday: signalsToday !== null ? signalsToday : await countSignalsToday(),
+        servedBy,
+        leaderHeartbeatAt,
+        leaderStale
     };
 };
 
@@ -2053,6 +2248,290 @@ app.put('/api/engine/settings', authenticateToken, requireAdmin, async (req, res
     console.log(`[engine] Motor ayarları güncellendi (kullanıcı: ${req.user.username}).`);
     res.json({ settings });
 });
+
+// ===== SIGNAL RELAY (several Node processes behind the host's proxy) =====
+// The host runs the app as several Node processes at once and every browser stays connected to one of them,
+// but io.emit only reaches the browsers of the emitting process. So every process (leader or standby) reads
+// the DB every 3 s and re-emits what the other processes stored:
+//  - 'new_signal': rows newer than its watermark minus 15 s (a slower process may insert a row with a slightly
+//    older time), except the ids this process emitted itself or already relayed (bounded: 2000 ids / 1 h).
+//    The watermark starts when the process starts: a process that boots later never replays history.
+//  - 'signal_deleted' / 'signals_cleared': DELETE /api/signals[/:id] also stores a tombstone in engine_state
+//    ('signals_deleted': the last 200 {id, at}; 'signals_cleared_at': ms); each process emits the new ones.
+// Cost per process and pass: one indexed SELECT on signals (time_ms, else time) and one engine_state read that
+// only returns rows changed in the last 15 s (normally none). DB errors are logged once per minute; the loop
+// keeps going and stops on shutdown.
+const RELAY_INTERVAL_MS = 3 * 1000;
+const RELAY_OVERLAP_MS = 15 * 1000;
+const RELAY_BATCH_LIMIT = 200;
+const RELAY_MAX_PAGES = 5;          // per pass; a larger burst continues on the next pass
+const RELAY_PASS_TIMEOUT_MS = 20 * 1000;
+// A pass that timed out may still wait for the DB on a pool connection (10 per process): besides the current
+// pass at most one such pass, so a hung DB never ties up more than 2 connections for the relay.
+const RELAY_MAX_IN_FLIGHT = 2;
+const RELAY_SEEN_MAX = 2000;
+const RELAY_SEEN_TTL_MS = 60 * 60 * 1000;
+// After a long DB outage only the last 30 min are caught up (well inside the 1 h memory of sent ids, so nothing
+// is sent twice); older rows are still in GET /api/signals, which browsers reload on every reconnect.
+const RELAY_MAX_LOOKBACK_MS = 30 * 60 * 1000;
+const RELAY_WARN_MS = 60 * 1000;
+const TOMBSTONES_KEEP = 200;
+const SIGNALS_DELETED_KEY = 'signals_deleted';
+const SIGNALS_CLEARED_KEY = 'signals_cleared_at';
+
+const relay = {
+    active: false,
+    timer: null,
+    pass: null,           // the pass in progress ({ startedAt })
+    inFlight: 0,          // passes whose queries have not settled yet (a timed-out pass may still wait for the DB)
+    startedAt: 0,         // rows older than this were history when the process started: never replayed
+    watermark: 0,         // start of the last complete pass; the next pass reads from watermark - 15 s
+    cursor: null,         // { column, value, id }: a burst larger than RELAY_MAX_PAGES pages continues after this row
+    rescanFrom: null,     // after a clear: read the surviving rows again from here
+    primed: false,        // the first complete pass is done
+    seen: new Map(),      // signal id -> { at, timeMs }: emitted by this process (itself or relayed)
+    deleted: new Map(),   // signal id -> at: deletions this process knows (its own or relayed)
+    tombstonesPrimed: false,
+    clearedAt: 0,         // newest "delete all" this process knows
+    stateSince: 0,        // the tombstone read returns engine_state rows changed since then (0: both rows)
+    changeSeq: 0,         // bumped by every delete / clear: a pass that overlapped one is redone
+    tombstoneWrites: Promise.resolve()
+};
+
+// Oldest first (Map insertion order; entries are never re-inserted): drop by age, then by count.
+const pruneRelayMap = (map, ttlMs, now) => {
+    for (const [key, entry] of map) {
+        const at = typeof entry === 'number' ? entry : entry.at;
+        if (map.size <= RELAY_SEEN_MAX && now - at < ttlMs) break;
+        map.delete(key);
+    }
+};
+
+// Signals this process sends itself are remembered BEFORE they are inserted, so its relay never sends them twice.
+const rememberRelayedSignal = (id, timeMs) => {
+    if (relay.seen.has(id)) return;
+    const now = Date.now();
+    relay.seen.set(id, { at: now, timeMs });
+    pruneRelayMap(relay.seen, RELAY_SEEN_TTL_MS, now);
+};
+
+// Deletions are bounded by count only: the stored list keeps the last 200, every one of them must stay known.
+const rememberDeletedSignal = (id) => {
+    if (relay.deleted.has(id)) return;
+    const now = Date.now();
+    relay.deleted.set(id, now);
+    pruneRelayMap(relay.deleted, Infinity, now);
+};
+
+const noteSignalDeleted = (id) => {
+    relay.changeSeq++;
+    rememberDeletedSignal(String(id));
+};
+
+// Rows stored after `at` survived the clear: they are forgotten, so the next pass sends them again to the
+// browsers that have just emptied their list.
+const noteSignalsCleared = (at) => {
+    relay.changeSeq++;
+    if (at > relay.clearedAt) relay.clearedAt = at;
+    for (const [id, entry] of relay.seen) {
+        if (entry.timeMs >= at) relay.seen.delete(id);
+    }
+    relay.rescanFrom = relay.rescanFrom === null ? at : Math.min(relay.rescanFrom, at);
+};
+
+const cleanTombstones = (raw) => (Array.isArray(raw)
+    ? raw.filter(t => isPlainObject(t) && typeof t.id === 'string' && t.id !== '' && Number.isFinite(t.at))
+    : []);
+
+// Serialised within this process. Two processes deleting in the very same moment may still lose one entry
+// (read-modify-write): the browsers of the other processes then keep that signal until their next reload.
+const queueTombstoneWrite = (label, write) => {
+    if (engineHost.stateTable !== true) return Promise.resolve();
+    const next = relay.tombstoneWrites
+        .then(() => withTimeout(write(), ENGINE_LOCK_QUERY_TIMEOUT_MS, label))
+        .catch(err => warnThrottled('tombstone', RELAY_WARN_MS, '[relay] Silme bilgisi diğer süreçlere iletilemedi:', err.code || err.message));
+    relay.tombstoneWrites = next;
+    return next;
+};
+
+const recordDeleteTombstone = (id) => queueTombstoneWrite('silme kaydı', async () => {
+    const list = cleanTombstones(await readEngineState(SIGNALS_DELETED_KEY)).filter(t => t.id !== String(id));
+    list.push({ id: String(id), at: Date.now() });
+    await writeEngineState(SIGNALS_DELETED_KEY, list.slice(-TOMBSTONES_KEEP));
+});
+
+const recordClearTombstone = (at) => queueTombstoneWrite('temizleme kaydı', () => writeEngineState(SIGNALS_CLEARED_KEY, at));
+
+// Deletions made through other processes. The first read only learns the current state (no replay at boot).
+const relayTombstones = async (pass, current) => {
+    if (engineHost.stateTable !== true) return;
+    const [rows] = await db.query(
+        'SELECT k, v, updated_at FROM engine_state WHERE k IN (?, ?) AND updated_at >= ?',
+        [SIGNALS_DELETED_KEY, SIGNALS_CLEARED_KEY, relay.stateSince]
+    );
+    if (!current()) return;
+    const values = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+        try {
+            values.set(row.k, JSON.parse(row.v));
+        } catch { /* malformed: ignored */ }
+    }
+    const announce = relay.tombstonesPrimed;
+    const clearedAt = Number(values.get(SIGNALS_CLEARED_KEY));
+    if (Number.isFinite(clearedAt) && clearedAt > relay.clearedAt) {
+        if (announce) {
+            noteSignalsCleared(clearedAt);
+            io.emit('signals_cleared');
+        } else {
+            relay.clearedAt = clearedAt;
+        }
+    }
+    for (const { id } of cleanTombstones(values.get(SIGNALS_DELETED_KEY))) {
+        if (relay.deleted.has(id)) continue;
+        if (announce) {
+            noteSignalDeleted(id);
+            io.emit('signal_deleted', { id });
+        } else {
+            rememberDeletedSignal(id);
+        }
+    }
+    relay.tombstonesPrimed = true;
+    relay.stateSince = pass.startedAt - RELAY_OVERLAP_MS;
+};
+
+const signalRowTimeMs = (row) => {
+    const ms = row.time_ms === null || row.time_ms === undefined ? NaN : Number(row.time_ms);
+    return Number.isFinite(ms) ? ms : Date.parse(row.time);
+};
+
+// New signals stored by other processes. Pages are keyed on (time, id): one engine pass stores all its signals
+// with the same time, so a burst of more than 200 rows shares one value and only the id tells them apart.
+const relaySignals = async (pass, current) => {
+    const useTimeMs = await hasSignalsTimeMs();
+    if (!current()) return;
+    const seq = relay.changeSeq;
+    const column = useTimeMs ? 'time_ms' : 'time';
+    const columns = `id, strategy, symbol, side, price, time, ${useTimeMs ? 'time_ms, ' : ''}note, source, confidence`;
+    let from = relay.watermark - RELAY_OVERLAP_MS;
+    if (relay.rescanFrom !== null) from = Math.min(from, relay.rescanFrom);
+    from = Math.max(from, pass.startedAt - RELAY_MAX_LOOKBACK_MS);
+    // { column, value, id }: the last row of the previous (incomplete) pass; dropped when a clear asks for a rescan
+    let after = relay.rescanFrom === null && relay.cursor && relay.cursor.column === column ? relay.cursor : null;
+    const found = new Map(); // id -> { row, timeMs }
+    let complete = false;
+    for (let page = 0; page < RELAY_MAX_PAGES; page++) {
+        const [rows] = after
+            ? await db.query(
+                `SELECT ${columns} FROM signals WHERE ${column} >= ? AND (${column} > ? OR id > ?) ORDER BY ${column} ASC, id ASC LIMIT ?`,
+                [after.value, after.value, after.id, RELAY_BATCH_LIMIT]
+            )
+            : await db.query(
+                `SELECT ${columns} FROM signals WHERE ${column} >= ? ORDER BY ${column} ASC, id ASC LIMIT ?`,
+                [useTimeMs ? from : new Date(from).toISOString(), RELAY_BATCH_LIMIT]
+            );
+        if (!current()) return;
+        const list = Array.isArray(rows) ? rows : [];
+        for (const row of list) {
+            if (!found.has(row.id) && !relay.seen.has(row.id)) found.set(row.id, { row, timeMs: signalRowTimeMs(row) });
+        }
+        if (list.length < RELAY_BATCH_LIMIT) {
+            complete = true;
+            break;
+        }
+        const last = list[list.length - 1]; // a full page: the next one starts right after its last row
+        after = { column, value: last[column], id: last.id };
+    }
+
+    const fresh = [];
+    for (const { row, timeMs } of found.values()) {
+        // History when the process started (or a row without a usable time): remembered, never sent.
+        if (!Number.isFinite(timeMs) || (!relay.primed && timeMs < relay.startedAt)) {
+            rememberRelayedSignal(row.id, timeMs);
+            continue;
+        }
+        fresh.push({ dto: toSignalDto(row), timeMs });
+    }
+    if (fresh.length > 0) await attachSignalMeta(fresh.map(entry => entry.dto)); // engine / magnitude
+    if (!current() || relay.changeSeq !== seq) return; // a delete / clear ran meanwhile: redone next pass
+    for (const { dto, timeMs } of fresh) {
+        if (relay.seen.has(dto.id) || relay.deleted.has(dto.id)) continue;
+        rememberRelayedSignal(dto.id, timeMs);
+        io.emit('new_signal', dto);
+    }
+    relay.rescanFrom = null;
+    if (complete) {
+        relay.cursor = null;
+        relay.primed = true;
+        relay.watermark = Math.max(relay.watermark, pass.startedAt);
+    } else {
+        relay.cursor = after;
+        warnThrottled('relay-burst', RELAY_WARN_MS, `[relay] ${RELAY_MAX_PAGES * RELAY_BATCH_LIMIT}+ yeni sinyal: aktarım sonraki turda sürüyor.`);
+    }
+};
+
+const relayTick = async () => {
+    if (!relay.active || relay.pass) return;
+    if (relay.inFlight >= RELAY_MAX_IN_FLIGHT) {
+        warnThrottled('relay-stuck', RELAY_WARN_MS, '[relay] Önceki aktarım sorguları veritabanından hâlâ yanıt bekliyor; yeni tur onlar bitince başlayacak.');
+        scheduleRelay();
+        return;
+    }
+    const pass = { startedAt: Date.now() };
+    relay.pass = pass;
+    const current = () => relay.active && relay.pass === pass;
+    const run = async () => {
+        try {
+            await relayTombstones(pass, current);
+        } catch (err) {
+            if (current()) warnThrottled('relay-tombstones', RELAY_WARN_MS, '[relay] Silinen sinyal bilgisi okunamadı:', err.code || err.message);
+        }
+        if (!current()) return;
+        try {
+            await relaySignals(pass, current);
+        } catch (err) {
+            if (current()) {
+                warnThrottled('relay-signals', RELAY_WARN_MS,
+                    '[relay] Yeni sinyaller okunamadı (diğer süreçlerin sinyalleri bu sürece bağlı tarayıcılara iletilemiyor, 3 sn sonra yeniden denenecek):',
+                    err.code || err.message);
+            }
+        }
+    };
+    relay.inFlight++;
+    const running = run().finally(() => { relay.inFlight--; });
+    try {
+        await withTimeout(running, RELAY_PASS_TIMEOUT_MS, 'sinyal aktarımı');
+    } catch (err) {
+        warnThrottled('relay-timeout', RELAY_WARN_MS, `[relay] ${err.message}; sonraki tur başlıyor.`);
+    } finally {
+        if (relay.pass === pass) relay.pass = null;
+        scheduleRelay();
+    }
+};
+
+const scheduleRelay = () => {
+    if (!relay.active) return;
+    if (relay.timer) clearTimeout(relay.timer);
+    relay.timer = unrefTimer(setTimeout(() => {
+        relay.timer = null;
+        relayTick().catch(() => { /* never rejects; logged inside */ });
+    }, RELAY_INTERVAL_MS));
+};
+
+// Started once the HTTP server listens, in every process (ENGINE_MODE=off included: it serves browsers too).
+const startSignalRelay = () => {
+    if (relay.active) return;
+    relay.active = true;
+    relay.startedAt = Date.now();
+    relay.watermark = relay.startedAt;
+    scheduleRelay();
+};
+
+const stopSignalRelay = () => {
+    relay.active = false;
+    if (relay.timer) clearTimeout(relay.timer);
+    relay.timer = null;
+    relay.pass = null;
+};
 
 // ===== HEALTH =====
 app.get('/health', async (req, res) => {
@@ -2118,6 +2597,7 @@ server.listen(PORT, HOST, () => {
     console.log(`👉 Webhook: POST /api/webhook ${process.env.WEBHOOK_SECRET ? '(secret korumalı)' : '(WEBHOOK_SECRET tanımlı değil, devre dışı)'}`);
     console.log('🔐 JWT kimlik doğrulaması etkin');
     console.log(`📡 Sinyal motoru: ${ENGINE_MODE === 'off' ? 'kapalı (ENGINE_MODE=off)' : engineModule ? 'sunucuda (kilit alınınca başlar)' : 'paket yok, devre dışı'}`);
+    startSignalRelay();
     startEngineHost().catch(err => console.error('[engine] Motor altyapısı başlatılamadı:', err && (err.code || err.message)));
 });
 
@@ -2148,6 +2628,16 @@ module.exports = {
         publishSignals: handleEngineSignals,
         persistCooldowns: scheduleCooldownWrite,
         flushCooldowns,
+        heartbeatNow: () => {
+            sendLeaderHeartbeat();
+            return engineHost.heartbeatPromise || Promise.resolve();
+        },
         shutdown: shutdownEngineHost
+    },
+    // Cross-process signal relay internals, for tests and diagnostics only.
+    signalRelay: {
+        state: relay,
+        tickNow: relayTick,
+        stop: stopSignalRelay
     }
 };
