@@ -1328,7 +1328,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 const PROCESS_STARTED_AT = Date.now();
 const ENGINE_LOCK_NAME = 'fidelio_engine';
 const ENGINE_LOCK_RETRY_MS = 60 * 1000;
-const ENGINE_LOCK_CHECK_MS = 30 * 1000;
+// Hostinger's MySQL drops connections that are idle for ~20 s, so the lock connection is used every 5 s.
+const ENGINE_LOCK_CHECK_MS = 5 * 1000;
 const ENGINE_DB_RETRY_MS = 30 * 1000;
 const ENGINE_SHARED_REFRESH_MS = 60 * 1000;
 const ENGINE_COOLDOWN_WRITE_MS = 10 * 1000;
@@ -1771,6 +1772,8 @@ const acquireEngineLock = async () => {
         return false;
     }
     engineHost.lockConn = conn;
+    // Ask the server to keep this session open longer (may be refused on shared hosting; the 5 s check still keeps it busy).
+    conn.query('SET SESSION wait_timeout = 3600').catch(() => { /* not allowed: rely on the frequent lock check */ });
     if (typeof conn.on === 'function') {
         conn.on('error', () => {
             if (engineHost.lockConn !== conn) return;
@@ -1827,7 +1830,7 @@ const stepDown = () => {
     engineHost.role = 'standby';
 };
 
-// Every 30 s: the query keeps the dedicated connection alive (wait_timeout) and proves we still hold the lock.
+// Every 5 s: the query keeps the dedicated connection alive (idle cut-off) and proves we still hold the lock.
 const checkEngineLock = async () => {
     if (engineHost.role !== 'leader' || engineHost.shuttingDown) return;
     const conn = engineHost.lockConn;
