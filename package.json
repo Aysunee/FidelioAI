@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && npm run build:engine",
+    "build:engine": "esbuild engine/index.ts --bundle --platform=node --format=cjs --target=node20 --external:ws --outfile=server/build/engine.cjs",
     "preview": "vite preview",
+    "prestart": "npm run build:engine || echo build:engine calismadi, sunucu mevcut server/build/engine.cjs ile veya sinyal motoru olmadan baslar",
     "start": "node server/index.cjs",
     "typecheck": "tsc --noEmit"
   },
@@ -32,6 +34,7 @@
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
     "tailwind-merge": "^3.4.0",
+    "ws": "^8.22.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
@@ -41,6 +44,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "esbuild": "0.25.12",
     "typescript": "~5.8.2",
     "vite": "^6.4.3"
   }

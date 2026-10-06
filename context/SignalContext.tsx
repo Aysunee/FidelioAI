@@ -5,50 +5,32 @@ import { useMarketData } from './MarketContext';
 import { useUser } from './UserContext';
 import { notificationManager, notifyBigMove, notifySignal, notifyPriceAlert } from '../utils/notifications';
 import { patternScanner, DetectedPattern } from '../services/patternScanner';
-import {
-    connectToBinanceHourTicker,
-    getCryptoPerpSymbols,
-    getCryptoPerpSymbolsSync,
-    getFundingIntervals,
-    getFundingIntervalsSync
-} from '../services/marketData';
-import { SOCKET_URL, apiJson } from '../utils/config';
+import { getCryptoPerpSymbols, getCryptoPerpSymbolsSync } from '../services/marketData';
+import { SOCKET_URL, ApiError, apiJson } from '../utils/config';
 import { readScoped, writeScoped } from '../utils/userStorage';
+import { getEngineStatus, putEngineSettings, type EngineStatus } from '../utils/engineApi';
 import {
     DEFAULT_SIGNAL_SETTINGS,
-    EMPTY_ENGINE_STAT,
     EMPTY_ENGINE_STATS,
     SIGNAL_SETTINGS_VERSION,
     STRATEGY_FUNDING_REGIME_NEG,
     STRATEGY_MOMENTUM_DOWN,
     STRATEGY_MOMENTUM_UP,
-    buildFundingRows,
-    createEngineCooldowns,
-    createFundingEngineState,
-    createMomentumState,
-    createVolumeState,
-    evaluateFunding,
-    evaluateMomentum,
-    evaluateVolume,
     moveDirectionLabel,
-    sanitizeEngineCooldowns,
     sanitizeSignalSettings,
     selectSpotUniverse,
     stepExtremeTrack,
-    type CooldownMap,
-    type EngineCooldowns,
-    type EngineSignal,
     type EngineStat,
     type EngineStats,
     type ExtremeTrack,
     type FundingRegimeEntry,
-    type HourTicker,
     type SignalSettings
 } from '../utils/signalEngines';
 
 // Settings schema (version 2), its bounds and the live counter types live next to the engines.
 export { DEFAULT_SIGNAL_SETTINGS, SIGNAL_SETTINGS_LIMITS } from '../utils/signalEngines';
 export type { SignalSettings, EngineStat, EngineStats, FundingRegimeEntry } from '../utils/signalEngines';
+export type { EngineStatus } from '../utils/engineApi';
 
 type Priority = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -84,13 +66,21 @@ interface SignalContextType {
     openAlertModal: (symbol: string) => void;
     closeAlertModal: () => void;
     handleCreateAlert: (price: number, condition: 'ABOVE' | 'BELOW') => void;
+    // Global settings of the server signal engine (GET /api/engine/status), the same for every user.
     signalSettings: SignalSettings;
-    updateSignalSettings: (settings: SignalSettings) => void;
-    // "Right now N of M symbols are beyond this threshold", per engine. Refreshed at most every 5 s.
+    // Admin only: PUT /api/engine/settings. Resolves to true when the server accepted the settings.
+    updateSignalSettings: (settings: SignalSettings) => Promise<boolean>;
+    // "Right now N of M symbols are beyond this threshold", per engine, as reported by the server.
     engineStats: EngineStats;
-    // Perps that are inside the negative funding gate right now (including the ones found at start-up,
-    // which are never emitted as signals).
+    // Perps that are inside the negative funding gate right now (including the ones found when the
+    // engine started, which are never emitted as signals).
     fundingRegimeActive: FundingRegimeEntry[];
+    // Last status of the server engine (null until the first successful request), polled every 15 s
+    // while the tab is visible.
+    engineStatus: EngineStatus | null;
+    // Message of the last failed status request (null after a success) and when the status was received.
+    engineStatusError: string | null;
+    engineStatusAt: number;
     bigMoves: BigMoveSignal[];
     futuresBigMoves: BigMoveSignal[];
     notificationSettings: NotificationSettings;
@@ -102,31 +92,26 @@ interface SignalContextType {
 const SignalContext = createContext<SignalContextType | undefined>(undefined);
 
 // ---------------------------------------------------------------------------
-// Signal policy (contract D): every algorithmic signal produced here is LOCAL to this browser
-// and is never POSTed to the server. Only an admin's manual injection (POST /api/signals) and
-// TradingView (/api/webhook, server side) create shared signals, which arrive via socket.io.
+// Signal policy: the three signal engines (momentum, volume, funding) run on the server, 24/7 in
+// one place. Their records are stored in MySQL and arrive here like every shared signal: GET
+// /api/signals history + socket.io 'new_signal'. TradingView (/api/webhook) and an admin's manual
+// injection (POST /api/signals) are the other shared sources. Nothing algorithmic runs in this
+// browser except the live big-move views and the pattern scanner.
 // ---------------------------------------------------------------------------
 
 // Per-user storage keys (scoped by user id through utils/userStorage)
 const RULES_KEY = 'fidelio_rules';
-const SIGNAL_SETTINGS_KEY = 'fidelio_signal_settings';
 const NOTIFICATION_SETTINGS_KEY = 'fidelio_notification_settings';
 const PRICE_ALERTS_KEY = 'fidelio_price_alerts';
 const SIGNAL_VIEW_KEY = 'fidelio_signal_view';
-// Cooldown stamps of the three local engines, so that a page reload does not re-emit a signal.
-const ENGINE_COOLDOWNS_KEY = 'fidelio_engine_cooldowns';
 
 const MAX_SERVER_SIGNALS = 200;
-const MAX_LOCAL_SIGNALS = 100;
+const MAX_ENGINE_SIGNALS = 200;
 const LOCAL_ID_PREFIX = 'local_';
 const TELEGRAM_MAX_PER_MINUTE = 20;
 
-// Engine scheduling
-const MOMENTUM_PASS_MS = 6000;
-const VOLUME_PASS_MS = 15000;
-const FUNDING_PASS_MS = 10000;
-const ENGINE_STATS_FLUSH_MS = 5000;        // engineStats reaches React state at most this often …
-const ENGINE_STATS_HEARTBEAT_MS = 60000;   // … and at least this often while the numbers do not change
+// Server engine status: polled while the tab is visible (paused when hidden, refreshed on return).
+const ENGINE_STATUS_POLL_MS = 15000;
 const FUTURES_META_POLL_MS = 60000;        // cached for an hour inside the service; this only retries failures
 // Futures rows older than this are not evaluated (stream down or the tab just woke up).
 const FUTURES_FRESH_MS = 90000;
@@ -173,8 +158,8 @@ export const getStrategyLabel = (strategy: string): string => {
 const PRIORITY_RANK: Record<Priority, number> = { LOW: 1, MEDIUM: 2, HIGH: 3 };
 const meetsMinPriority = (priority: Priority, min: Priority) => PRIORITY_RANK[priority] >= PRIORITY_RANK[min];
 
-// Shared (webhook / manual) signals are the primary product and count as HIGH. Local engine records
-// are descriptive events: momentum and funding LOW, volume MEDIUM. Nothing local is HIGH.
+// Shared (webhook / manual) signals are the primary product and count as HIGH. Engine records are
+// descriptive events: momentum and funding LOW, volume MEDIUM. No engine record is HIGH.
 export const getSignalPriority = (signal: Signal): Priority => {
     switch (signal.engine) {
         case 'MOMENTUM': return 'LOW';
@@ -190,11 +175,15 @@ export const getSignalPriority = (signal: Signal): Priority => {
     }
 };
 
-// Records of the local engines: their side is the direction of the measured move, not advice.
+// Records of the signal engines: their side is the direction of the measured move, not advice.
 const isEngineSignal = (signal: Pick<Signal, 'engine'>) =>
     signal.engine === 'MOMENTUM' || signal.engine === 'VOLUME' || signal.engine === 'FUNDING';
 
-// "BTCUSDT BUY" for shared signals; "BTCUSDT · hareket yönü yukarı" / "BTCUSDT · yönsüz" for local records.
+// Engine records, including stored rows of the old engine versions (source only, no engine field).
+const isAlgoRecord = (signal: Signal) =>
+    isEngineSignal(signal) || (typeof signal.source === 'string' && signal.source.startsWith('ALGO_'));
+
+// "BTCUSDT BUY" for shared signals; "BTCUSDT · hareket yönü yukarı" / "BTCUSDT · yönsüz" for engine records.
 const signalHeadline = (signal: Signal): string => {
     if (isEngineSignal(signal)) {
         return `${signal.symbol} · ${signal.side === 'NEUTRAL' ? 'yönsüz' : `hareket yönü ${moveDirectionLabel(signal.side)}`}`;
@@ -294,32 +283,6 @@ const sanitizeSignalView = (raw: unknown): SignalViewState => {
 };
 
 const loadRules = (userId: string | null) => (userId ? sanitizeRules(readScoped<unknown>(RULES_KEY, userId, [])) : []);
-// Anything stored without `version: 2` (the previous schema used seconds and raw fractions) is
-// discarded by sanitizeSignalSettings and replaced by the defaults.
-const loadSignalSettings = (userId: string | null) =>
-    (userId ? sanitizeSignalSettings(readScoped<unknown>(SIGNAL_SETTINGS_KEY, userId, null)) : DEFAULT_SIGNAL_SETTINGS);
-const loadEngineCooldowns = (userId: string | null): EngineCooldowns =>
-    (userId ? sanitizeEngineCooldowns(readScoped<unknown>(ENGINE_COOLDOWNS_KEY, userId, null), Date.now()) : createEngineCooldowns());
-
-// Other tabs of the same user write to the same key: keep the newest stamp of every entry.
-const mergeCooldownMaps = (stored: CooldownMap, own: CooldownMap): CooldownMap => {
-    const merged: CooldownMap = { ...stored };
-    Object.keys(own).forEach(key => {
-        if (!(merged[key] >= own[key])) merged[key] = own[key];
-    });
-    return merged;
-};
-
-const persistEngineCooldowns = (userId: string | null, own: EngineCooldowns) => {
-    if (!userId) return;
-    const stored = loadEngineCooldowns(userId);
-    writeScoped(ENGINE_COOLDOWNS_KEY, userId, sanitizeEngineCooldowns({
-        version: 1,
-        momentum: mergeCooldownMaps(stored.momentum, own.momentum),
-        volume: mergeCooldownMaps(stored.volume, own.volume),
-        funding: mergeCooldownMaps(stored.funding, own.funding)
-    }, Date.now()));
-};
 const loadNotificationSettings = (userId: string | null) =>
     (userId ? sanitizeNotificationSettings(readScoped<unknown>(NOTIFICATION_SETTINGS_KEY, userId, null)) : DEFAULT_NOTIFICATION_SETTINGS);
 const loadPriceAlerts = (userId: string | null) => (userId ? sanitizePriceAlerts(readScoped<unknown>(PRICE_ALERTS_KEY, userId, [])) : []);
@@ -345,6 +308,25 @@ const toIsoTime = (value: unknown): string => {
     return new Date().toISOString();
 };
 
+// The server engine writes these sources; `engine` is only accepted when it matches the source.
+const ENGINE_BY_SOURCE: Partial<Record<NonNullable<Signal['source']>, 'MOMENTUM' | 'VOLUME' | 'FUNDING'>> = {
+    ALGO_MOMENTUM: 'MOMENTUM',
+    ALGO_VOLUME: 'VOLUME',
+    ALGO_DIVERGENCE: 'FUNDING'
+};
+
+// The measured size stored next to an engine record (signal_meta.magnitude).
+const normalizeMagnitude = (raw: unknown): Signal['magnitude'] => {
+    if (!isRecord(raw)) return undefined;
+    const value = Number(raw.value);
+    if (!Number.isFinite(value) || typeof raw.text !== 'string' || raw.text.trim() === '') return undefined;
+    return {
+        value,
+        text: raw.text.slice(0, 40),
+        caption: typeof raw.caption === 'string' ? raw.caption.slice(0, 160) : ''
+    };
+};
+
 // Validates a signal coming from the server (history or socket) before it reaches the UI.
 const normalizeServerSignal = (raw: unknown): Signal | null => {
     if (!isRecord(raw)) return null;
@@ -355,6 +337,13 @@ const normalizeServerSignal = (raw: unknown): Signal | null => {
     if (!id || !symbol || !SIDES.has(side) || !Number.isFinite(price)) return null;
     const confidence = raw.confidence === null || raw.confidence === undefined ? NaN : Number(raw.confidence);
     const source = typeof raw.source === 'string' && SOURCES.has(raw.source) ? raw.source as Signal['source'] : undefined;
+    // Engine records of the server carry engine + magnitude (signal_meta). Stored rows of the old
+    // algorithm versions ('ALGO_*' without meta) get no engine: their rules were different.
+    const sourceEngine = source ? ENGINE_BY_SOURCE[source] : undefined;
+    const engine: Signal['engine'] = source === 'WEBHOOK' || source === 'MANUAL'
+        ? source
+        : sourceEngine && raw.engine === sourceEngine ? sourceEngine : undefined;
+    const isEngine = engine === 'MOMENTUM' || engine === 'VOLUME' || engine === 'FUNDING';
     return {
         // Server ids can never be mistaken for browser-local ones
         id: id.startsWith(LOCAL_ID_PREFIX) ? `srv_${id}` : id,
@@ -364,55 +353,50 @@ const normalizeServerSignal = (raw: unknown): Signal | null => {
         price,
         time: toIsoTime(raw.time),
         note: typeof raw.note === 'string' ? raw.note : '',
-        confidence: Number.isFinite(confidence) ? confidence : undefined,
+        // Engines never write a confidence: their measured size is in `magnitude`.
+        confidence: !isEngine && Number.isFinite(confidence) ? confidence : undefined,
         source,
-        // Stored rows of the old algorithm versions ('ALGO_*') get no engine: their rules were different.
-        engine: source === 'WEBHOOK' || source === 'MANUAL' ? source : undefined
+        engine,
+        magnitude: isEngine ? normalizeMagnitude(raw.magnitude) : undefined
     };
 };
 
-// Merge by id (incoming wins), newest first, with separate caps so local algorithm signals
-// can never push shared (webhook/manual) signals out of the list.
+// Merge by id (incoming wins), newest first, with separate caps so engine records can never push
+// shared (webhook/manual) signals out of the list.
 const mergeSignals = (prev: Signal[], incoming: Signal[]): Signal[] => {
     const byId = new Map<string, Signal>();
     [...incoming, ...prev].forEach(signal => {
         if (!byId.has(signal.id)) byId.set(signal.id, signal);
     });
     const sorted = Array.from(byId.values()).sort((a, b) => signalTime(b) - signalTime(a));
-    let localCount = 0;
-    let serverCount = 0;
+    let engineCount = 0;
+    let sharedCount = 0;
     return sorted.filter(signal => {
-        if (isLocalSignal(signal)) return ++localCount <= MAX_LOCAL_SIGNALS;
-        return ++serverCount <= MAX_SERVER_SIGNALS;
+        if (isLocalSignal(signal) || isAlgoRecord(signal)) return ++engineCount <= MAX_ENGINE_SIGNALS;
+        return ++sharedCount <= MAX_SERVER_SIGNALS;
     });
 };
 
-const localSignalId = (kind: string, symbol: string, now: number) =>
-    `${LOCAL_ID_PREFIX}${kind}_${symbol}_${now}_${Math.random().toString(36).slice(2, 7)}`;
-
-const ENGINE_ID_KIND: Record<EngineSignal['engine'], string> = { MOMENTUM: 'mom', VOLUME: 'vol', FUNDING: 'fund' };
-
-// Engine output -> a browser-local Signal. No confidence is written: the measured size is in `magnitude`.
-const toLocalSignal = (draft: EngineSignal): Signal => ({
-    id: localSignalId(ENGINE_ID_KIND[draft.engine], draft.symbol, draft.at),
-    strategy: draft.strategy,
-    symbol: draft.symbol,
-    side: draft.side,
-    price: draft.price,
-    time: new Date(draft.at).toISOString(),
-    note: draft.note,
-    source: draft.source,
-    engine: draft.engine,
-    magnitude: draft.magnitude
-});
-
 const sameStat = (a: EngineStat, b: EngineStat) => a.matching === b.matching && a.universe === b.universe;
 
-const sameActiveSymbols = (a: FundingRegimeEntry[], b: FundingRegimeEntry[]) => {
-    if (a.length !== b.length) return false;
-    const symbols = new Set(a.map(entry => entry.symbol));
-    return b.every(entry => symbols.has(entry.symbol));
-};
+const sameSettings = (a: SignalSettings, b: SignalSettings) =>
+    a.momentum.threshold === b.momentum.threshold && a.momentum.cooldownHours === b.momentum.cooldownHours
+    && a.volume.ratio === b.volume.ratio && a.volume.cooldownHours === b.volume.cooldownHours
+    && a.funding.thresholdPct === b.funding.thresholdPct && a.funding.cooldownHours === b.funding.cooldownHours;
+
+const sameActiveFunding = (a: FundingRegimeEntry[], b: FundingRegimeEntry[]) =>
+    a.length === b.length && a.every((entry, i) =>
+        entry.symbol === b[i].symbol && entry.f8Pct === b[i].f8Pct && entry.since === b[i].since);
+
+// The server's "active now" list ({ symbol, f8 (fraction), since }) in the engine's entry shape.
+const toFundingRegimeEntries = (status: EngineStatus): FundingRegimeEntry[] =>
+    status.activeFunding.map(item => ({
+        symbol: item.symbol,
+        f8Pct: item.f8 * 100,
+        // Without an episode peak in the status, the current level is the best known value.
+        peakF8Pct: (item.peakF8 ?? item.f8) * 100,
+        since: item.since
+    }));
 
 const formatSignalPrice = (price: number) => {
     if (!Number.isFinite(price)) return '—';
@@ -426,7 +410,7 @@ const sanitizeTelegramText = (value: string, max: number) =>
 // Plain text (no parse_mode): strategy/note may contain '_' or '*' that would break Markdown,
 // and webhook-supplied text must not be able to inject formatting.
 const buildTelegramText = (signal: Signal) => {
-    // Colour = direction (for local records: of the measured move). A record without a direction is white.
+    // Colour = direction (for engine records: of the measured move). A record without a direction is white.
     const emoji = signal.side === 'NEUTRAL' ? '⚪' : signal.side === 'BUY' || signal.side === 'LONG' ? '🟢' : '🔴';
     const time = new Date(signal.time);
     const timeText = Number.isNaN(time.getTime()) ? signal.time : time.toLocaleTimeString('tr-TR');
@@ -439,7 +423,7 @@ const buildTelegramText = (signal: Signal) => {
     }
     lines.push(`Fiyat: $${formatSignalPrice(signal.price)}`, `Zaman: ${timeText}`);
     if (signal.note) lines.push(`Not: ${sanitizeTelegramText(signal.note, 500)}`);
-    if (isLocalSignal(signal)) lines.push('(Tarayıcınızda üretilen yerel kayıt; işlem önerisi değildir)');
+    if (isEngineSignal(signal)) lines.push('(Sinyal motoru kaydı; işlem önerisi değildir)');
     return lines.join('\n');
 };
 
@@ -507,7 +491,6 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     // Per-user persisted state (contract B). Loaded for the current user, re-loaded when the user changes.
     const [hydratedUserId, setHydratedUserId] = useState<string | null>(userId);
     const [rules, setRules] = useState<NotificationRule[]>(() => loadRules(userId));
-    const [signalSettings, setSignalSettings] = useState<SignalSettings>(() => loadSignalSettings(userId));
     const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(() => loadNotificationSettings(userId));
     const [priceAlerts, setPriceAlerts] = useState<StoredPriceAlert[]>(() => loadPriceAlerts(userId));
     const [signalView, setSignalView] = useState<SignalViewState>(() => loadSignalView(userId));
@@ -516,15 +499,24 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     const [patterns, setPatterns] = useState<DetectedPattern[]>([]);
     const [bigMoves, setBigMoves] = useState<BigMoveSignal[]>([]);
     const [futuresBigMoves, setFuturesBigMoves] = useState<BigMoveSignal[]>([]);
-    // Low-frequency copies of the engine counters (the engines write to refs; see flushEngineStats).
+    // Server engine: global settings, counters and status (GET /api/engine/status, see the poll below).
+    // Settings / counters / active list keep their identity while the numbers do not change.
+    const [signalSettings, setSignalSettings] = useState<SignalSettings>(DEFAULT_SIGNAL_SETTINGS);
     const [engineStats, setEngineStats] = useState<EngineStats>(EMPTY_ENGINE_STATS);
     const [fundingRegimeActive, setFundingRegimeActive] = useState<FundingRegimeEntry[]>([]);
+    const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+    const [engineStatusError, setEngineStatusError] = useState<string | null>(null);
+    const [engineStatusAt, setEngineStatusAt] = useState(0);
 
     // Refs (intervals and socket handlers read the latest values without being re-created)
     const marketDataRef = useRef(marketData);
     const futuresDataRef = useRef(futuresData);
-    const settingsRef = useRef(signalSettings);
     const notificationSettingsRef = useRef(notificationSettings);
+    // Whether the server sends engine signals to Telegram itself (the browser then skips them);
+    // null until the first engine status arrived.
+    const serverTelegramRef = useRef<boolean | null>(null);
+    // Fetches the engine status right away (used after saving the settings).
+    const refreshEngineStatusRef = useRef<(() => void) | null>(null);
     const rulesRef = useRef(rules);
     const spotLiveRef = useRef(connectionStatus === 'connected');
     const futuresLiveRef = useRef(futuresConnectionStatus === 'connected');
@@ -532,20 +524,16 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     const notifiedSignalIdsRef = useRef<Set<string>>(new Set());
     const telegramSentRef = useRef<number[]>([]);
     const telegramErrorShownRef = useRef(false);
-    // Rolling 1h spot tickers (`!ticker_1h@arr`), kept out of React state: ~2000 rows change every second.
-    const hourTickersRef = useRef<Map<string, HourTicker>>(new Map());
     // Local time of the last futures batch; stale rows (sleeping tab, stream down) are not evaluated.
     const futuresDataAtRef = useRef(0);
-    // Runs every engine pass right away (used when the settings change, so the counters follow at once).
-    const enginesKickRef = useRef<(() => void) | null>(null);
 
     // Declared before the other effects so they always see the values of the current commit.
     useEffect(() => {
         if (futuresDataRef.current !== futuresData) futuresDataAtRef.current = Date.now();
         marketDataRef.current = marketData;
         futuresDataRef.current = futuresData;
-        settingsRef.current = signalSettings;
         notificationSettingsRef.current = notificationSettings;
+        serverTelegramRef.current = engineStatus ? engineStatus.telegram.server === true : null;
         rulesRef.current = rules;
         spotLiveRef.current = connectionStatus === 'connected';
         futuresLiveRef.current = futuresConnectionStatus === 'connected';
@@ -555,7 +543,6 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     useEffect(() => {
         if (hydratedUserId === userId) return;
         setRules(loadRules(userId));
-        setSignalSettings(loadSignalSettings(userId));
         setNotificationSettings(loadNotificationSettings(userId));
         setPriceAlerts(loadPriceAlerts(userId));
         setSignalView(loadSignalView(userId));
@@ -576,10 +563,6 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     useEffect(() => {
         if (canPersist) writeScoped(RULES_KEY, userId, rules);
     }, [canPersist, userId, rules]);
-
-    useEffect(() => {
-        if (canPersist) writeScoped(SIGNAL_SETTINGS_KEY, userId, signalSettings);
-    }, [canPersist, userId, signalSettings]);
 
     useEffect(() => {
         if (canPersist) writeScoped(NOTIFICATION_SETTINGS_KEY, userId, notificationSettings);
@@ -607,11 +590,33 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         setToasts(prev => prev.filter(t => t.id !== id));
     }, []);
 
-    const updateSignalSettings = useCallback((newSettings: SignalSettings) => {
-        // Values are clamped into the allowed ranges; the engines re-seed silently on a threshold change.
-        setSignalSettings(sanitizeSignalSettings({ ...newSettings, version: SIGNAL_SETTINGS_VERSION }));
-        addToast('Ayarlar güncellendi', 'Sinyal motoru eşikleri güncellendi; motorlar sessizce yeniden başlatıldı.', 'success');
-    }, [addToast]);
+    // Global engine settings: only an admin may change them (the server enforces it too). Values are
+    // clamped into the allowed ranges; the server engine re-seeds silently on a threshold change.
+    const updateSignalSettings = useCallback(async (newSettings: SignalSettings): Promise<boolean> => {
+        const adminOnly = () => addToast(
+            'Sinyal ayarlarını yalnızca yönetici değiştirebilir',
+            'Bu ayarlar sunucudaki sinyal motoru içindir ve tüm kullanıcılar için ortaktır.',
+            'alert'
+        );
+        if (!isAdmin) {
+            adminOnly();
+            return false;
+        }
+        try {
+            const saved = await putEngineSettings(sanitizeSignalSettings({ ...newSettings, version: SIGNAL_SETTINGS_VERSION }));
+            setSignalSettings(prev => (sameSettings(prev, saved) ? prev : saved));
+            addToast('Ayarlar kaydedildi', 'Sunucudaki sinyal motoru yeni eşiklerle sessizce yeniden başladı; ayarlar tüm kullanıcılar için geçerli.', 'success');
+            refreshEngineStatusRef.current?.();
+            return true;
+        } catch (err) {
+            if (err instanceof ApiError && err.status === 403) {
+                adminOnly();
+            } else {
+                addToast('Ayarlar kaydedilemedi', err instanceof Error ? err.message : 'Bilinmeyen hata', 'alert');
+            }
+            return false;
+        }
+    }, [isAdmin, addToast]);
 
     const updateNotificationSettings = useCallback((newSettings: Partial<NotificationSettings>) => {
         setNotificationSettings(prev => sanitizeNotificationSettings({ ...prev, ...newSettings }));
@@ -686,15 +691,93 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         if (!meetsMinPriority(priority, settings.minPriorityLevel)) return;
 
         notifySignal(signal.symbol, label, priority, signal.price);
+        // Engine records (engine field, or an ALGO_* source if the meta row is missing) are sent to
+        // Telegram once by the server when it is configured for that. Until the first engine status
+        // arrived it is unknown, and the browser rather skips one message than sends a duplicate.
+        if (isAlgoRecord(signal) && serverTelegramRef.current !== false) return;
         sendTelegram(signal);
     }, [addToast, sendTelegram]);
 
-    // Local (browser-only) algorithmic signals
-    const emitLocalSignals = useCallback((list: Signal[]) => {
-        if (list.length === 0) return;
-        setSignals(prev => mergeSignals(prev, list));
-        list.forEach(signal => dispatchSignalNotifications(signal));
-    }, [dispatchSignalNotifications]);
+    // --- Server engine status: settings, counters, health (polled while the tab is visible) ---
+    const applyEngineStatus = useCallback((status: EngineStatus) => {
+        setEngineStatus(status);
+        setEngineStatusError(null);
+        setEngineStatusAt(Date.now());
+        setSignalSettings(prev => (sameSettings(prev, status.settings) ? prev : status.settings));
+        setEngineStats(prev => (
+            sameStat(prev.momentum, status.stats.momentum)
+            && sameStat(prev.volume, status.stats.volume)
+            && sameStat(prev.funding, status.stats.funding)
+            && prev.updatedAt === status.stats.updatedAt
+                ? prev
+                : status.stats
+        ));
+        const active = toFundingRegimeEntries(status);
+        setFundingRegimeActive(prev => (sameActiveFunding(prev, active) ? prev : active));
+    }, []);
+
+    useEffect(() => {
+        if (!isAuthenticated || typeof document === 'undefined' || typeof window === 'undefined') return;
+        let disposed = false;
+        let timer: number | null = null;
+        let inFlight: AbortController | null = null;
+
+        const clearTimer = () => {
+            if (timer !== null) window.clearTimeout(timer);
+            timer = null;
+        };
+
+        const schedule = () => {
+            clearTimer();
+            if (!disposed && document.visibilityState === 'visible') timer = window.setTimeout(() => { poll(); }, ENGINE_STATUS_POLL_MS);
+        };
+
+        // `force`: fetch even in a hidden tab. Used for the first request, so that a tab opened in the
+        // background still knows the settings and whether the server sends Telegram itself.
+        const poll = async (force = false) => {
+            clearTimer();
+            if (disposed || (!force && document.visibilityState !== 'visible')) return;
+            inFlight?.abort();
+            const controller = new AbortController();
+            inFlight = controller;
+            try {
+                const status = await getEngineStatus(controller.signal);
+                if (disposed || controller.signal.aborted) return;
+                applyEngineStatus(status);
+            } catch (err) {
+                if (disposed || controller.signal.aborted) return;
+                const message = err instanceof Error ? err.message : 'Bilinmeyen hata';
+                setEngineStatusError(prev => (prev === message ? prev : message));
+            } finally {
+                if (inFlight === controller) {
+                    inFlight = null;
+                    schedule();
+                }
+            }
+        };
+
+        // Hidden tab: no requests. Back to visible: refresh at once, then every 15 s.
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+                poll();
+            } else {
+                clearTimer();
+                inFlight?.abort();
+                inFlight = null;
+            }
+        };
+
+        refreshEngineStatusRef.current = () => { poll(true); };
+        poll(true);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            disposed = true;
+            refreshEngineStatusRef.current = null;
+            clearTimer();
+            inFlight?.abort();
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [isAuthenticated, applyEngineStatus]);
 
     // --- Patterns: one scanner loop while logged in ---
     useEffect(() => {
@@ -743,7 +826,7 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                 const added = new Set(live.added);
                 const serverList = live.cleared ? [] : valid.filter(s => !live.removed.has(s.id));
                 // The server list is the source of truth (picks up deletes/clears missed while the
-                // socket was down); local algorithm signals and live arrivals during the request stay.
+                // socket was down); browser-local entries and live arrivals during the request stay.
                 setSignals(prev => mergeSignals(prev.filter(s => isLocalSignal(s) || added.has(s.id)), serverList));
             } catch (err) {
                 console.error('Sinyal geçmişi alınamadı:', err instanceof Error ? err.message : err);
@@ -937,172 +1020,17 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         )));
     }, [marketData, priceAlerts, isAuthenticated, addToast]);
 
-    // --- Futures metadata: crypto-perp universe + funding intervals (cached 1h in the service) ---
-    // Engines that look at futures skip their work until both are loaded.
+    // --- Futures metadata: crypto-perp universe (cached 1h in the service) ---
+    // The futures big-move scanner skips its work until the list is loaded.
     useEffect(() => {
         if (!isAuthenticated) return;
         const load = () => {
             getCryptoPerpSymbols().catch(() => { /* logged by the service; retried on the next tick */ });
-            getFundingIntervals().catch(() => { /* same */ });
         };
         load();
         const timer = setInterval(load, FUTURES_META_POLL_MS);
         return () => clearInterval(timer);
     }, [isAuthenticated]);
-
-    // --- Rolling 1h spot tickers for the volume engine ---
-    useEffect(() => {
-        if (!isAuthenticated) return;
-        const rows = hourTickersRef.current;
-        rows.clear();
-        const disconnect = connectToBinanceHourTicker(tickers => {
-            const receivedAt = Date.now();
-            tickers.forEach(t => {
-                rows.set(t.symbol, {
-                    symbol: t.symbol,
-                    quoteVolume: t.quoteVolume,
-                    priceChangePercent: t.priceChangePercent,
-                    lastPrice: t.lastPrice,
-                    receivedAt
-                });
-            });
-        });
-        return () => {
-            disconnect();
-            rows.clear();
-        };
-    }, [isAuthenticated]);
-
-    // --- Local signal engines: momentum, volume, funding regime ---
-    // The rules live in utils/signalEngines.ts (pure, replayable). This effect only feeds them the live
-    // data, keeps their state and cooldown stamps (persisted per user), and hands the output to
-    // emitLocalSignals. Every engine seeds on its first pass and re-seeds silently after a threshold
-    // change or a data gap, so neither start-up nor a settings change produces a burst.
-    useEffect(() => {
-        if (!isAuthenticated) return;
-        let cooldowns = loadEngineCooldowns(userId);
-        let momentumState = createMomentumState();
-        let volumeState = createVolumeState();
-        let fundingState = createFundingEngineState();
-        const stats: { momentum: EngineStat; volume: EngineStat; funding: EngineStat } = {
-            momentum: EMPTY_ENGINE_STAT,
-            volume: EMPTY_ENGINE_STAT,
-            funding: EMPTY_ENGINE_STAT
-        };
-        let active: FundingRegimeEntry[] = [];
-
-        const saveCooldowns = (next: EngineCooldowns) => {
-            cooldowns = next;
-            persistEngineCooldowns(userId, next);
-        };
-
-        const momentumPass = () => {
-            if (!spotLiveRef.current) {
-                stats.momentum = EMPTY_ENGINE_STAT;
-                return;
-            }
-            const result = evaluateMomentum(
-                Object.values(marketDataRef.current),
-                settingsRef.current.momentum,
-                momentumState,
-                cooldowns.momentum,
-                Date.now()
-            );
-            momentumState = result.state;
-            stats.momentum = result.stat;
-            if (result.cooldowns !== cooldowns.momentum) saveCooldowns({ ...cooldowns, momentum: result.cooldowns });
-            if (result.signals.length > 0) emitLocalSignals(result.signals.map(toLocalSignal));
-        };
-
-        const volumePass = () => {
-            if (!spotLiveRef.current) {
-                stats.volume = EMPTY_ENGINE_STAT;
-                return;
-            }
-            const result = evaluateVolume(
-                Object.values(marketDataRef.current),
-                hourTickersRef.current,
-                settingsRef.current.volume,
-                volumeState,
-                cooldowns.volume,
-                Date.now()
-            );
-            volumeState = result.state;
-            stats.volume = result.stat;
-            if (result.cooldowns !== cooldowns.volume) saveCooldowns({ ...cooldowns, volume: result.cooldowns });
-            if (result.signals.length > 0) emitLocalSignals(result.signals.map(toLocalSignal));
-        };
-
-        const fundingPass = () => {
-            const now = Date.now();
-            const perps = getCryptoPerpSymbolsSync();
-            const intervals = getFundingIntervalsSync();
-            // Unknown intervals would make the 8h-equivalent rate of most (4h) contracts twice too small.
-            if (!futuresLiveRef.current || !perps || !intervals || now - futuresDataAtRef.current > FUTURES_FRESH_MS) {
-                stats.funding = EMPTY_ENGINE_STAT;
-                active = [];
-                return;
-            }
-            const rows = buildFundingRows(Object.values(futuresDataRef.current), perps, intervals);
-            const result = evaluateFunding(rows, settingsRef.current.funding, fundingState, cooldowns.funding, now);
-            fundingState = result.state;
-            stats.funding = result.stat;
-            active = result.active;
-            if (result.cooldowns !== cooldowns.funding) saveCooldowns({ ...cooldowns, funding: result.cooldowns });
-            if (result.signals.length > 0) emitLocalSignals(result.signals.map(toLocalSignal));
-        };
-
-        // Counters reach React state at most every 5 s, and only when a number changed (heartbeat: 60 s).
-        // The active funding list updates when its membership changes (its values refresh on the heartbeat).
-        let activeFlushedAt = 0;
-        let activeFlushed: FundingRegimeEntry[] = [];
-        const flushEngineStats = () => {
-            const now = Date.now();
-            const snapshot = { momentum: stats.momentum, volume: stats.volume, funding: stats.funding };
-            setEngineStats(prev => {
-                const same = sameStat(prev.momentum, snapshot.momentum)
-                    && sameStat(prev.volume, snapshot.volume)
-                    && sameStat(prev.funding, snapshot.funding);
-                if (same && now - prev.updatedAt < ENGINE_STATS_HEARTBEAT_MS) return prev;
-                return { ...snapshot, updatedAt: now };
-            });
-            const list = active;
-            if (!sameActiveSymbols(activeFlushed, list) || now - activeFlushedAt >= ENGINE_STATS_HEARTBEAT_MS) {
-                activeFlushed = list;
-                activeFlushedAt = now;
-                setFundingRegimeActive(list);
-            }
-        };
-
-        enginesKickRef.current = () => {
-            momentumPass();
-            volumePass();
-            fundingPass();
-            flushEngineStats();
-        };
-
-        const momentumTimer = setInterval(momentumPass, MOMENTUM_PASS_MS);
-        const volumeTimer = setInterval(volumePass, VOLUME_PASS_MS);
-        const fundingTimer = setInterval(fundingPass, FUNDING_PASS_MS);
-        const statsTimer = setInterval(flushEngineStats, ENGINE_STATS_FLUSH_MS);
-
-        return () => {
-            enginesKickRef.current = null;
-            clearInterval(momentumTimer);
-            clearInterval(volumeTimer);
-            clearInterval(fundingTimer);
-            clearInterval(statsTimer);
-        };
-    }, [isAuthenticated, userId, emitLocalSignals]);
-
-    // Settings changed (or were re-loaded for another user): evaluate at once so the counters in the
-    // settings dialog follow immediately. A changed threshold only re-seeds, it never emits.
-    const kickedSettingsRef = useRef(signalSettings);
-    useEffect(() => {
-        if (kickedSettingsRef.current === signalSettings) return;
-        kickedSettingsRef.current = signalSettings;
-        enginesKickRef.current?.();
-    }, [signalSettings]);
 
     // --- Logic: Big Move Scanner (Spot) ---
     // Universe: the shared liquid spot universe (>= 1M USDT, no pegged pairs, 24h range >= 0.3%).
@@ -1401,12 +1329,14 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         alertModal, openAlertModal, closeAlertModal, handleCreateAlert,
         signalSettings, updateSignalSettings,
         engineStats, fundingRegimeActive,
+        engineStatus, engineStatusError, engineStatusAt,
         notificationSettings, updateNotificationSettings, requestNotificationPermission,
         patterns
     }), [
         visibleSignals, bigMoves, futuresBigMoves, rules, priceAlerts, removePriceAlert, toasts, addToast, dismissToast,
         handleDeleteSignal, handleClearAllSignals, handleManualSignal, alertModal, openAlertModal, closeAlertModal,
         handleCreateAlert, signalSettings, updateSignalSettings, engineStats, fundingRegimeActive,
+        engineStatus, engineStatusError, engineStatusAt,
         notificationSettings, updateNotificationSettings, requestNotificationPermission, patterns
     ]);
 

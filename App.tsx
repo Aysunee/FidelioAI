@@ -16,6 +16,7 @@ import { PortfolioProvider } from './context/PortfolioContext';
 
 import { useKeyboardShortcuts, VIEW_SHORTCUTS } from './hooks/useKeyboardShortcuts';
 import { translations } from './utils/translations';
+import { describeEngineHealth, ENGINE_TONE_DOT } from './utils/engineApi';
 
 // ---------------------------------------------------------------------------
 // Lazily loaded views and modal bodies (keeps the login screen and initial bundle small)
@@ -127,6 +128,19 @@ const ConnectionBadge: React.FC<ConnectionBadgeProps> = ({ connectedLabel, conne
         <div role="status" aria-label={label} title={label} className="flex shrink-0 items-center gap-1.5 px-1.5 text-[11px] text-secondary">
             <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
             <span className="hidden whitespace-nowrap lg:inline">{label}</span>
+        </div>
+    );
+};
+
+// Server signal engine: green = running leader, amber = standby or a data stream down,
+// red = engine off / not running / status unreachable. The tooltip says why.
+const EngineBadge: React.FC = () => {
+    const { engineStatus, engineStatusError, engineStatusAt } = useSignals();
+    const { tone, text } = describeEngineHealth(engineStatus, engineStatusError, engineStatusAt, Date.now());
+    return (
+        <div role="status" aria-label={text} title={text} className="flex shrink-0 items-center gap-1.5 px-1.5 text-[11px] text-secondary">
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ENGINE_TONE_DOT[tone]}`} />
+            <span className="whitespace-nowrap">Motor</span>
         </div>
     );
 };
@@ -428,6 +442,7 @@ const AppContent: React.FC = () => {
 
                 <div className="ml-auto flex shrink-0 items-center gap-0.5 px-2 md:border-l md:border-border">
                     <ConnectionBadge connectedLabel={t.connected} connectingLabel={t.connecting} staleLabel={t.dataStale} disconnectedLabel={t.disconnected} />
+                    <EngineBadge />
                     <button
                         type="button"
                         onClick={toggleTheme}

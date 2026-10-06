@@ -379,7 +379,8 @@ const loadSignals = async (limit) => {
         `SELECT id, strategy, symbol, side, price, time, note, source, confidence FROM signals ORDER BY ${orderBy} LIMIT ?`,
         [limit]
     );
-    return rows.map(toSignalDto);
+    // Engine signals carry engine + magnitude in signal_meta (see the SIGNAL ENGINE section).
+    return attachSignalMeta(rows.map(toSignalDto));
 };
 
 // Always tries the time_ms column first instead of trusting the cached "missing" answer: if the migration
@@ -663,6 +664,7 @@ app.delete('/api/signals/:id', authenticateToken, requireAdmin, async (req, res)
     if (!result.affectedRows) {
         return res.status(404).json({ error: 'Sinyal bulunamadı.' });
     }
+    await deleteSignalMeta(req.params.id);
     io.emit('signal_deleted', { id: req.params.id });
     res.json({ success: true });
 });
@@ -670,6 +672,7 @@ app.delete('/api/signals/:id', authenticateToken, requireAdmin, async (req, res)
 // Delete all signals (admin only)
 app.delete('/api/signals', authenticateToken, requireAdmin, async (req, res) => {
     const [result] = await db.query('DELETE FROM signals');
+    await deleteSignalMeta(null);
     recentWebhookSignals.clear();
     io.emit('signals_cleared');
     console.log(`[signals] Tüm sinyaller silindi (${result.affectedRows || 0} kayıt, kullanıcı: ${req.user.username})`);
@@ -1310,6 +1313,744 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     }
 });
 
+// ===== SIGNAL ENGINE (momentum / volume / funding, server side) =====
+// The three engines run in this Node process, 24/7 and in ONE place: their signals are stored in
+// `signals` (+ engine / magnitude in `signal_meta`), broadcast over socket.io and optionally sent to
+// one Telegram chat. The engine core is TypeScript in engine/ (no Express / DB inside), bundled by
+// `npm run build:engine` into server/build/engine.cjs.
+//  - Single leader: only the process holding the MySQL named lock 'fidelio_engine' runs the engine.
+//    The lock lives on a dedicated connection that is never returned to the pool; other processes
+//    (a second instance, or the old process during a redeploy) stay 'standby' and retry every 60 s.
+//  - engine_state holds 'settings' (global, admin-editable), 'cooldowns' (written at most every 10 s,
+//    reloaded on start so that a restart does not re-announce) and 'boots' (last 50 process starts).
+//  - Without the tables (no CREATE privilege) everything keeps working with in-memory state.
+
+const PROCESS_STARTED_AT = Date.now();
+const ENGINE_LOCK_NAME = 'fidelio_engine';
+const ENGINE_LOCK_RETRY_MS = 60 * 1000;
+const ENGINE_LOCK_CHECK_MS = 30 * 1000;
+const ENGINE_DB_RETRY_MS = 30 * 1000;
+const ENGINE_SHARED_REFRESH_MS = 60 * 1000;
+const ENGINE_COOLDOWN_WRITE_MS = 10 * 1000;
+const ENGINE_BOOTS_KEEP = 50;
+const ENGINE_SIGNAL_SOURCES = ['ALGO_MOMENTUM', 'ALGO_VOLUME', 'ALGO_DIVERGENCE'];
+const ENGINE_KINDS = ['MOMENTUM', 'VOLUME', 'FUNDING'];
+const ENGINE_STREAM_KEYS = ['spotMini', 'spotHour', 'futuresMark', 'futuresMini'];
+const SIGNALS_TODAY_CACHE_MS = 15 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const parseEngineMode = (raw) => {
+    const value = String(raw === undefined || raw === null ? '' : raw).trim().toLowerCase();
+    if (value === '' || value === 'server') return 'server';
+    if (['off', 'false', '0', 'disabled', 'none'].includes(value)) return 'off';
+    console.warn(`⚠️  ENGINE_MODE="${value.slice(0, 40)}" tanınmıyor ('server' veya 'off' olmalı); 'server' kullanılıyor.`);
+    return 'server';
+};
+const ENGINE_MODE = parseEngineMode(process.env.ENGINE_MODE);
+
+const ENGINE_BUNDLE_PATH = path.join(__dirname, 'build', 'engine.cjs');
+let engineModule = null;
+try {
+    engineModule = require(ENGINE_BUNDLE_PATH);
+} catch (err) {
+    if (err && err.code === 'MODULE_NOT_FOUND' && !fs.existsSync(ENGINE_BUNDLE_PATH)) {
+        console.warn('⚠️  Sinyal motoru paketi yok (server/build/engine.cjs): motor devre dışı. `npm run build` veya `npm run build:engine` çalıştırın; sunucu motor olmadan çalışmaya devam ediyor.');
+    } else {
+        console.error('❌ Sinyal motoru paketi yüklenemedi, motor devre dışı:', err && (err.code || err.message));
+    }
+}
+
+const engineLog = {
+    info: (message) => console.log(message),
+    warn: (message) => console.warn(message),
+    error: (message) => console.error(message)
+};
+
+// The same failure (e.g. DB down) is logged at most every 5 minutes.
+const engineWarnedAt = new Map();
+const engineWarn = (key, ...args) => {
+    const now = Date.now();
+    if (now - (engineWarnedAt.get(key) || 0) < 5 * 60 * 1000) return;
+    engineWarnedAt.set(key, now);
+    console.warn(...args);
+};
+
+const unrefTimer = (timer) => {
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    return timer;
+};
+
+const sleep = (ms) => new Promise(resolve => unrefTimer(setTimeout(resolve, ms)));
+
+// A hung query on the lock connection (silent network drop: no FIN, no error) must not keep a stale
+// leader running or block re-election forever, so the lock queries race against a timer.
+const ENGINE_LOCK_QUERY_TIMEOUT_MS = 10 * 1000;
+const withTimeout = (promise, ms, label) => {
+    let timer = null;
+    const timeout = new Promise((resolve, reject) => {
+        timer = unrefTimer(setTimeout(() => {
+            const err = new Error(`${label}: ${Math.round(ms / 1000)} sn içinde yanıt yok`);
+            err.code = 'ENGINE_TIMEOUT';
+            reject(err);
+        }, ms));
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
+
+const engineTelegram = engineModule
+    ? engineModule.createTelegramNotifier({
+        botToken: process.env.TELEGRAM_BOT_TOKEN,
+        chatId: process.env.TELEGRAM_CHAT_ID,
+        minPriority: process.env.TELEGRAM_MIN_PRIORITY,
+        maxPerMinute: 20,
+        log: engineLog
+    })
+    : null;
+if (engineTelegram && engineTelegram.enabled) {
+    console.log(`📨 Motor sinyalleri Telegram'a sunucudan gönderilecek (en düşük öncelik: ${engineTelegram.minPriority}).`);
+}
+
+const engineHost = {
+    role: ENGINE_MODE === 'server' && engineModule ? 'standby' : 'off', // 'leader' | 'standby' | 'off'
+    engine: null,
+    lockConn: null,
+    stateTable: null,  // engine_state usable: true / false (in-memory only) / null (not checked yet)
+    metaTable: null,   // signal_meta usable: same
+    settings: engineModule ? engineModule.sanitizeSignalSettings(null) : null,
+    cooldowns: null,   // latest cooldown stamps (also kept in memory for in-memory mode)
+    boots: [PROCESS_STARTED_AT],
+    pendingCooldowns: null,
+    cooldownTimer: null,
+    lastCooldownWriteAt: 0,
+    lockTimer: null,
+    lockCheckTimer: null,
+    sharedTimer: null,
+    shuttingDown: false,
+    acquiring: false,
+    settingsSeq: 0,    // bumped by every settings change of this process (PUT); see refreshSharedState
+    standbyLogged: false,
+    today: { day: 0, count: 0 },          // engine signals published by THIS process since 00:00 UTC
+    todayCache: { day: 0, at: 0, value: 0 } // DB count (all processes), cached briefly
+};
+
+// --- engine_state / signal_meta ---
+const ENGINE_TABLES = {
+    engine_state: {
+        create: 'CREATE TABLE IF NOT EXISTS engine_state (k VARCHAR(64) PRIMARY KEY, v LONGTEXT, updated_at BIGINT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+        probe: 'SELECT k FROM engine_state LIMIT 1',
+        without: 'motor durumu (ayarlar, bekleme süreleri, başlangıçlar) yalnızca bellekte tutulacak'
+    },
+    signal_meta: {
+        create: 'CREATE TABLE IF NOT EXISTS signal_meta (signal_id VARCHAR(50) PRIMARY KEY, engine VARCHAR(16), magnitude TEXT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+        probe: 'SELECT signal_id FROM signal_meta LIMIT 1',
+        without: 'motor sinyallerinin motor/ölçüm bilgisi saklanmayacak'
+    }
+};
+
+// Additive only: CREATE TABLE IF NOT EXISTS, never ALTER / DROP. Without the CREATE privilege a table
+// that already exists (created from server/schema.sql) is still used.
+const ensureEngineTable = async (table) => {
+    const def = ENGINE_TABLES[table];
+    try {
+        await db.query(def.create);
+        return true;
+    } catch (createErr) {
+        try {
+            await db.query(def.probe);
+            return true;
+        } catch {
+            console.warn(`⚠️  [engine] ${table} tablosu oluşturulamadı (${createErr.code || createErr.message}); ${def.without}.`);
+            return false;
+        }
+    }
+};
+
+const readEngineState = async (key) => {
+    const [rows] = await db.query('SELECT v FROM engine_state WHERE k = ? LIMIT 1', [key]);
+    const raw = rows && rows[0] ? rows[0].v : undefined;
+    if (typeof raw !== 'string') return undefined;
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return undefined;
+    }
+};
+
+const writeEngineState = async (key, value) => {
+    await db.query(
+        'INSERT INTO engine_state (k, v, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v), updated_at = VALUES(updated_at)',
+        [key, JSON.stringify(value), Date.now()]
+    );
+};
+
+const cleanBoots = (raw) => (Array.isArray(raw)
+    ? raw.filter(t => typeof t === 'number' && Number.isFinite(t) && t > 0)
+    : []);
+
+const withOwnBoot = (boots) => {
+    const list = boots.includes(PROCESS_STARTED_AT) ? boots.slice() : [...boots, PROCESS_STARTED_AT];
+    return list.sort((a, b) => a - b).slice(-ENGINE_BOOTS_KEEP);
+};
+
+// Boot history: lets us see whether the host keeps the process alive (every restart adds an entry).
+const recordBoot = async () => {
+    if (!engineHost.stateTable) return;
+    try {
+        engineHost.boots = withOwnBoot(cleanBoots(await readEngineState('boots')));
+        await writeEngineState('boots', engineHost.boots);
+        const lastDay = engineHost.boots.filter(t => t >= PROCESS_STARTED_AT - DAY_MS).length;
+        console.log(`[engine] Süreç başlangıcı kaydedildi (son 24 saatte ${lastDay} başlangıç, kayıtlı ${engineHost.boots.length}).`);
+    } catch (err) {
+        engineWarn('boots', '[engine] Süreç başlangıcı kaydedilemedi:', err.code || err.message);
+    }
+};
+
+const applyEngineSettings = (settings, { local = false } = {}) => {
+    if (local) engineHost.settingsSeq++;
+    engineHost.settings = settings;
+    if (engineHost.role === 'leader' && engineHost.engine) engineHost.engine.updateSettings(settings);
+};
+
+// Settings may be changed through another process (PUT on the standby instance): re-read them every
+// minute. Also refreshes the boot list. Returns the stored cooldowns when asked for them.
+const refreshSharedState = async ({ withCooldowns = false } = {}) => {
+    if (!engineHost.stateTable) return undefined;
+    // A PUT handled by this process while the read was in flight wins over the (older) row just read.
+    const seq = engineHost.settingsSeq;
+    try {
+        const stored = await readEngineState('settings');
+        if (stored !== undefined && engineModule && seq === engineHost.settingsSeq) {
+            const settings = engineModule.sanitizeSignalSettings(stored);
+            if (JSON.stringify(settings) !== JSON.stringify(engineHost.settings)) applyEngineSettings(settings);
+        }
+        const boots = cleanBoots(await readEngineState('boots'));
+        if (boots.length > 0) engineHost.boots = withOwnBoot(boots);
+        return withCooldowns ? await readEngineState('cooldowns') : undefined;
+    } catch (err) {
+        engineWarn('shared', '[engine] Motor durumu veritabanından okunamadı:', err.code || err.message);
+        return undefined;
+    }
+};
+
+// --- Cooldown persistence (at most one write per 10 s; final flush on shutdown) ---
+const flushCooldowns = async () => {
+    if (engineHost.cooldownTimer) {
+        clearTimeout(engineHost.cooldownTimer);
+        engineHost.cooldownTimer = null;
+    }
+    const value = engineHost.pendingCooldowns;
+    if (!value || !engineHost.stateTable) return;
+    engineHost.pendingCooldowns = null;
+    engineHost.lastCooldownWriteAt = Date.now();
+    try {
+        await writeEngineState('cooldowns', value);
+    } catch (err) {
+        engineWarn('cooldowns', '[engine] Bekleme süreleri kaydedilemedi:', err.code || err.message);
+        if (!engineHost.pendingCooldowns) engineHost.pendingCooldowns = value;
+        if (engineHost.role === 'leader' && !engineHost.shuttingDown) scheduleCooldownWrite(engineHost.pendingCooldowns);
+    }
+};
+
+// Newest stamp per key of two cooldown sets (either may be missing or malformed).
+const mergeCooldowns = (a, b) => {
+    const now = Date.now();
+    const x = engineModule.sanitizeEngineCooldowns(a, now);
+    const y = engineModule.sanitizeEngineCooldowns(b, now);
+    for (const kind of ['momentum', 'volume', 'funding']) {
+        for (const [key, at] of Object.entries(y[kind])) {
+            if (!(x[kind][key] >= at)) x[kind][key] = at;
+        }
+    }
+    return x;
+};
+
+const scheduleCooldownWrite = (cooldowns) => {
+    engineHost.cooldowns = cooldowns;
+    if (!engineHost.stateTable) return;
+    engineHost.pendingCooldowns = cooldowns;
+    if (engineHost.cooldownTimer) return;
+    const wait = Math.max(0, engineHost.lastCooldownWriteAt + ENGINE_COOLDOWN_WRITE_MS - Date.now());
+    engineHost.cooldownTimer = unrefTimer(setTimeout(() => {
+        engineHost.cooldownTimer = null;
+        flushCooldowns().catch(() => { /* logged inside */ });
+    }, wait));
+};
+
+// --- Engine signals -> signals + signal_meta -> socket.io -> Telegram ---
+const cleanMagnitude = (raw) => {
+    if (!isPlainObject(raw)) return null;
+    const value = Number(raw.value);
+    if (!Number.isFinite(value) || typeof raw.text !== 'string' || typeof raw.caption !== 'string') return null;
+    return { value, text: raw.text.slice(0, 40), caption: raw.caption.slice(0, 120) };
+};
+
+const parseStoredMagnitude = (raw) => {
+    if (typeof raw !== 'string' || raw === '') return null;
+    try {
+        return cleanMagnitude(JSON.parse(raw));
+    } catch {
+        return null;
+    }
+};
+
+const utcDayStart = (t) => t - (((t % DAY_MS) + DAY_MS) % DAY_MS);
+
+const countEngineSignal = (at) => {
+    const day = utcDayStart(at);
+    if (engineHost.today.day !== day) engineHost.today = { day, count: 0 };
+    engineHost.today.count++;
+    engineHost.todayCache.at = 0; // the DB count is stale now
+};
+
+// Same rule as webhook / manual signals: stored first, broadcast only after the row is safely stored.
+const publishEngineSignal = async (draft) => {
+    if (!isPlainObject(draft) || !ENGINE_KINDS.includes(draft.engine) || !ENGINE_SIGNAL_SOURCES.includes(draft.source)) {
+        engineWarn('bad-signal', '[engine] Geçersiz motor sinyali atlandı.');
+        return null;
+    }
+    const price = Number(draft.price);
+    if (!Number.isFinite(price) || price <= 0 || price >= MAX_PRICE) {
+        engineWarn('bad-price', `[engine] Geçersiz fiyatlı motor sinyali atlandı (${String(draft.symbol).slice(0, 20)}).`);
+        return null;
+    }
+    const at = typeof draft.at === 'number' && Number.isFinite(draft.at) ? draft.at : Date.now();
+    const signal = {
+        id: crypto.randomUUID(),
+        strategy: String(draft.strategy || '').slice(0, 100),
+        symbol: String(draft.symbol || '').slice(0, 20),
+        side: String(draft.side || 'NEUTRAL').slice(0, 10),
+        price: Number(price.toFixed(8)), // DECIMAL(20, 8): broadcast exactly what GET /api/signals returns
+        time: new Date(at).toISOString(),
+        note: typeof draft.note === 'string' ? draft.note : '',
+        source: draft.source,
+        confidence: null // engines never write a confidence; the measured size is in magnitude
+    };
+    await insertSignal(signal, at);
+
+    const magnitude = cleanMagnitude(draft.magnitude);
+    if (engineHost.metaTable !== false) {
+        try {
+            await db.query(
+                'INSERT INTO signal_meta (signal_id, engine, magnitude) VALUES (?, ?, ?)',
+                [signal.id, draft.engine, magnitude ? JSON.stringify(magnitude) : null]
+            );
+        } catch (err) {
+            engineWarn('meta-insert', '[engine] Sinyalin motor/ölçüm bilgisi kaydedilemedi:', err.code || err.message);
+        }
+    }
+
+    const dto = { ...toSignalDto(signal), engine: draft.engine };
+    if (magnitude) dto.magnitude = magnitude;
+    io.emit('new_signal', dto);
+    countEngineSignal(at);
+    console.log(`[engine] Sinyal: ${dto.symbol} ${dto.side} ${dto.strategy}${magnitude ? ` (${magnitude.text})` : ''}`);
+    if (engineTelegram) {
+        engineTelegram.notify(dto).catch(err => engineWarn('telegram', '[telegram] Motor sinyali gönderilemedi:', err && err.name));
+    }
+    return dto;
+};
+
+const handleEngineSignals = async (signals) => {
+    if (!Array.isArray(signals)) return [];
+    const published = [];
+    for (const draft of signals) {
+        try {
+            const dto = await publishEngineSignal(draft);
+            if (dto) published.push(dto);
+        } catch (err) {
+            console.error('[engine] Sinyal kaydedilemedi, yayımlanmadı:', err && (err.code || err.message));
+        }
+    }
+    return published;
+};
+
+// GET /api/signals: engine / magnitude of engine signals come from signal_meta (second query, so a
+// missing table never breaks the signal list).
+const attachSignalMeta = async (signals) => {
+    if (engineHost.metaTable === false) return signals;
+    const ids = signals.filter(s => ENGINE_SIGNAL_SOURCES.includes(s.source)).map(s => s.id);
+    if (ids.length === 0) return signals;
+    try {
+        const [rows] = await db.query(
+            `SELECT signal_id, engine, magnitude FROM signal_meta WHERE signal_id IN (${ids.map(() => '?').join(', ')})`,
+            ids
+        );
+        const byId = new Map((rows || []).map(row => [row.signal_id, row]));
+        for (const signal of signals) {
+            const meta = byId.get(signal.id);
+            if (!meta) continue;
+            if (ENGINE_KINDS.includes(meta.engine)) signal.engine = meta.engine;
+            const magnitude = parseStoredMagnitude(meta.magnitude);
+            if (magnitude) signal.magnitude = magnitude;
+        }
+    } catch (err) {
+        engineWarn('meta-read', '[engine] Sinyallerin motor/ölçüm bilgisi okunamadı:', err.code || err.message);
+    }
+    return signals;
+};
+
+// Best effort: a leftover signal_meta row is harmless (it is only ever read by signal id).
+const deleteSignalMeta = async (id) => {
+    if (engineHost.metaTable === false) return;
+    try {
+        if (id === null) await db.query('DELETE FROM signal_meta');
+        else await db.query('DELETE FROM signal_meta WHERE signal_id = ?', [id]);
+    } catch (err) {
+        engineWarn('meta-delete', '[engine] signal_meta temizlenemedi:', err.code || err.message);
+    }
+};
+
+// Engine signals since 00:00 UTC: counted in the DB (covers every process and restart), cached for 15 s;
+// this process's own count is the fallback.
+const countSignalsToday = async () => {
+    const now = Date.now();
+    const day = utcDayStart(now);
+    const local = engineHost.today.day === day ? engineHost.today.count : 0;
+    const cache = engineHost.todayCache;
+    if (cache.day === day && now - cache.at < SIGNALS_TODAY_CACHE_MS) return Math.max(cache.value, local);
+    let value = local;
+    try {
+        const useTimeMs = await hasSignalsTimeMs();
+        const [rows] = await db.query(
+            `SELECT COUNT(*) AS total FROM signals WHERE source IN (?, ?, ?) AND ${useTimeMs ? 'time_ms' : 'time'} >= ?`,
+            [...ENGINE_SIGNAL_SOURCES, useTimeMs ? day : new Date(day).toISOString()]
+        );
+        value = Number(rows && rows[0] && rows[0].total) || 0;
+    } catch (err) {
+        engineWarn('today', '[engine] Bugünkü sinyal sayısı okunamadı:', err.code || err.message);
+    }
+    engineHost.todayCache = { day, at: now, value };
+    return Math.max(value, local);
+};
+
+// --- Leader lock (MySQL named lock on a dedicated connection) ---
+// Never return a connection that holds the lock to the pool: the lock would stay with whoever uses it next.
+const dropConnection = (conn) => {
+    if (!conn) return;
+    try {
+        if (typeof conn.destroy === 'function') conn.destroy(); // closing the connection frees its locks
+        else if (typeof conn.release === 'function') conn.release();
+    } catch { /* already gone */ }
+};
+
+const acquireEngineLock = async () => {
+    // Gave up waiting (timeout): a connection / lock that arrives later is dropped, never kept.
+    let abandoned = false;
+    const attempt = (async () => {
+        const conn = await db.getConnection();
+        if (abandoned) {
+            dropConnection(conn);
+            return null;
+        }
+        let acquired = false;
+        try {
+            const [rows] = await conn.query('SELECT GET_LOCK(?, 0) AS acquired', [ENGINE_LOCK_NAME]);
+            acquired = !!(rows && rows[0]) && Number(rows[0].acquired) === 1;
+        } catch (err) {
+            dropConnection(conn);
+            throw err;
+        }
+        if (abandoned) {
+            dropConnection(conn); // closing the connection frees a lock it may have just taken
+            return null;
+        }
+        return { conn, acquired };
+    })();
+    let result;
+    try {
+        result = await withTimeout(attempt, ENGINE_LOCK_QUERY_TIMEOUT_MS, 'kilit sorgusu');
+    } catch (err) {
+        abandoned = true;
+        attempt.catch(() => { /* reported through the timeout */ });
+        throw err;
+    }
+    if (!result) return false;
+    const { conn, acquired } = result;
+    if (!acquired) {
+        conn.release(); // holds nothing
+        return false;
+    }
+    engineHost.lockConn = conn;
+    if (typeof conn.on === 'function') {
+        conn.on('error', () => {
+            if (engineHost.lockConn !== conn) return;
+            // The lock died with its connection: check (and step down) right away.
+            scheduleLockCheck(0);
+        });
+    }
+    return true;
+};
+
+const releaseEngineLock = async () => {
+    const conn = engineHost.lockConn;
+    engineHost.lockConn = null;
+    if (!conn) return;
+    try {
+        await withTimeout(conn.query('SELECT RELEASE_LOCK(?) AS released', [ENGINE_LOCK_NAME]), 2000, 'kilit bırakma');
+    } catch { /* closing the connection below releases it as well */ }
+    dropConnection(conn);
+};
+
+const scheduleLockRetry = (ms) => {
+    if (engineHost.lockTimer) clearTimeout(engineHost.lockTimer);
+    engineHost.lockTimer = unrefTimer(setTimeout(() => {
+        engineHost.lockTimer = null;
+        tryBecomeLeader().catch(err => console.error('[engine] Motor kilidi denemesi başarısız:', err && (err.code || err.message)));
+    }, ms));
+};
+
+const scheduleLockCheck = (ms = ENGINE_LOCK_CHECK_MS) => {
+    if (engineHost.lockCheckTimer) clearTimeout(engineHost.lockCheckTimer);
+    engineHost.lockCheckTimer = unrefTimer(setTimeout(() => {
+        engineHost.lockCheckTimer = null;
+        checkEngineLock().catch(err => console.error('[engine] Kilit kontrolü başarısız:', err && (err.code || err.message)));
+    }, ms));
+};
+
+// Lost leadership: stop at once. Pending cooldowns are dropped, the new leader may already write its own.
+const stepDown = () => {
+    if (engineHost.lockCheckTimer) clearTimeout(engineHost.lockCheckTimer);
+    engineHost.lockCheckTimer = null;
+    if (engineHost.cooldownTimer) clearTimeout(engineHost.cooldownTimer);
+    engineHost.cooldownTimer = null;
+    engineHost.pendingCooldowns = null;
+    if (engineHost.engine) {
+        try {
+            engineHost.engine.stop();
+        } catch (err) {
+            console.error('[engine] Motor durdurulamadı:', err && err.message);
+        }
+    }
+    const conn = engineHost.lockConn;
+    engineHost.lockConn = null;
+    dropConnection(conn);
+    engineHost.role = 'standby';
+};
+
+// Every 30 s: the query keeps the dedicated connection alive (wait_timeout) and proves we still hold the lock.
+const checkEngineLock = async () => {
+    if (engineHost.role !== 'leader' || engineHost.shuttingDown) return;
+    const conn = engineHost.lockConn;
+    let held = false;
+    let reason = 'kilit bağlantısı yok';
+    if (conn) {
+        try {
+            const [rows] = await withTimeout(
+                conn.query('SELECT IS_USED_LOCK(?) AS holder, CONNECTION_ID() AS me', [ENGINE_LOCK_NAME]),
+                ENGINE_LOCK_QUERY_TIMEOUT_MS,
+                'kilit kontrolü'
+            );
+            const row = rows && rows[0];
+            held = !!row && row.holder !== null && row.holder !== undefined && String(row.holder) === String(row.me);
+            if (!held) reason = 'kilit artık bu bağlantıda değil';
+        } catch (err) {
+            reason = `kilit bağlantısı koptu: ${err.code === 'ENGINE_TIMEOUT' ? err.message : (err.code || err.message)}`;
+        }
+    }
+    if (engineHost.role !== 'leader' || engineHost.shuttingDown || engineHost.lockConn !== conn) return;
+    if (held) {
+        scheduleLockCheck();
+        return;
+    }
+    console.warn(`[engine] Motor kilidi kaybedildi (${reason}); motor durduruldu, kilit yeniden denenecek.`);
+    stepDown();
+    scheduleLockRetry(5000);
+};
+
+const becomeLeader = async () => {
+    engineHost.role = 'leader';
+    engineHost.standbyLogged = false;
+    // Latest settings and the cooldown stamps of the previous run (so a restart does not re-announce).
+    // Stored and in-memory stamps are merged: after a short lock loss this process may hold newer stamps
+    // than the last (throttled) write, and the stored ones may come from another leader.
+    const stored = await withTimeout(refreshSharedState({ withCooldowns: true }), ENGINE_LOCK_QUERY_TIMEOUT_MS, 'motor durumu')
+        .catch(err => {
+            engineWarn('shared', '[engine] Motor durumu veritabanından okunamadı:', err.message);
+            return undefined;
+        });
+    if (engineHost.role !== 'leader' || engineHost.shuttingDown) return;
+    const cooldowns = mergeCooldowns(stored, engineHost.cooldowns);
+    let engine;
+    try {
+        engine = engineModule.createEngine({
+            settings: engineHost.settings,
+            cooldowns,
+            onSignals: handleEngineSignals,
+            onStateChange: scheduleCooldownWrite,
+            log: engineLog
+        });
+        engine.start();
+    } catch (err) {
+        console.error('[engine] Motor başlatılamadı:', err && err.message);
+        if (engine) {
+            try { engine.stop(); } catch { /* ignore */ }
+        }
+        await releaseEngineLock();
+        engineHost.role = 'standby';
+        scheduleLockRetry(ENGINE_LOCK_RETRY_MS);
+        return;
+    }
+    engineHost.engine = engine;
+    engineHost.cooldowns = engine.getCooldowns();
+    console.log('[engine] Motor kilidi alındı: sinyal motoru bu süreçte çalışıyor.');
+    scheduleLockCheck();
+};
+
+const tryBecomeLeader = async () => {
+    if (engineHost.shuttingDown || engineHost.role === 'leader' || engineHost.acquiring || !engineModule || ENGINE_MODE !== 'server') return;
+    // One attempt at a time: a second, overlapping attempt would see the lock held by the first and
+    // overwrite its 'leader' role with 'standby'.
+    engineHost.acquiring = true;
+    let acquired = false;
+    let failed = false;
+    try {
+        try {
+            acquired = await acquireEngineLock();
+        } catch (err) {
+            failed = true;
+            const reason = err.code === 'ENGINE_TIMEOUT' ? err.message : (err.code || err.message);
+            engineWarn('lock', `[engine] Motor kilidi denenemedi (${reason}); ${ENGINE_LOCK_RETRY_MS / 1000} sn sonra yeniden denenecek.`);
+        }
+        if (engineHost.shuttingDown) {
+            if (acquired) await releaseEngineLock();
+            return;
+        }
+        if (acquired) {
+            await becomeLeader();
+            return;
+        }
+    } finally {
+        engineHost.acquiring = false;
+    }
+    engineHost.role = 'standby';
+    if (!failed && !engineHost.standbyLogged) {
+        engineHost.standbyLogged = true;
+        console.log(`[engine] Motor kilidi başka bir süreçte: bu süreç beklemede (${ENGINE_LOCK_RETRY_MS / 1000} sn'de bir yeniden denenecek).`);
+    }
+    scheduleLockRetry(ENGINE_LOCK_RETRY_MS);
+};
+
+// Started once the HTTP server listens; never blocks or breaks the API.
+const startEngineHost = async () => {
+    for (let attempt = 1; ; attempt++) {
+        if (engineHost.shuttingDown) return;
+        try {
+            await db.query('SELECT 1');
+            break;
+        } catch (err) {
+            if (attempt === 1 || attempt % 10 === 0) {
+                console.warn(`[engine] Veritabanına ulaşılamıyor (${err.code || err.message}); ${ENGINE_DB_RETRY_MS / 1000} sn sonra yeniden denenecek.`);
+            }
+            await sleep(ENGINE_DB_RETRY_MS);
+        }
+    }
+    engineHost.stateTable = await ensureEngineTable('engine_state');
+    engineHost.metaTable = await ensureEngineTable('signal_meta');
+    await recordBoot();
+    await refreshSharedState();
+    engineHost.sharedTimer = unrefTimer(setInterval(() => {
+        refreshSharedState().catch(() => { /* logged inside */ });
+    }, ENGINE_SHARED_REFRESH_MS));
+
+    if (ENGINE_MODE !== 'server') {
+        console.log('[engine] ENGINE_MODE=off: sinyal motoru bu süreçte çalışmıyor.');
+        return;
+    }
+    if (!engineModule) return;
+    await tryBecomeLeader();
+};
+
+// SIGTERM / SIGINT: final cooldown write, stop the engine, release the lock (a standby process takes it
+// at its next attempt, within 60 s).
+const shutdownEngineHost = async () => {
+    if (engineHost.shuttingDown) return;
+    engineHost.shuttingDown = true;
+    for (const key of ['lockTimer', 'lockCheckTimer']) {
+        if (engineHost[key]) clearTimeout(engineHost[key]);
+        engineHost[key] = null;
+    }
+    if (engineHost.sharedTimer) clearInterval(engineHost.sharedTimer);
+    engineHost.sharedTimer = null;
+    const wasLeader = engineHost.role === 'leader';
+    if (engineHost.engine) {
+        try {
+            engineHost.engine.stop();
+        } catch { /* ignore */ }
+        if (wasLeader) engineHost.pendingCooldowns = engineHost.engine.getCooldowns();
+    }
+    if (wasLeader) await flushCooldowns();
+    await releaseEngineLock();
+    engineHost.role = 'off';
+};
+
+const zeroEngineStat = () => ({ matching: 0, universe: 0 });
+
+const buildEngineStatus = async () => {
+    const snap = engineHost.engine ? engineHost.engine.getStatus() : null;
+    const running = engineHost.role === 'leader' && !!snap && snap.running;
+    const streams = {};
+    for (const key of ENGINE_STREAM_KEYS) streams[key] = running && snap.streams[key] ? snap.streams[key] : 'down';
+    return {
+        mode: ENGINE_MODE,
+        running,
+        role: engineHost.role,
+        startedAt: running ? snap.startedAt : null,
+        uptimeSec: Math.floor(process.uptime()),
+        processStartedAt: PROCESS_STARTED_AT,
+        boots: engineHost.boots.slice(-ENGINE_BOOTS_KEEP),
+        streams,
+        lastScan: snap ? { ...snap.lastScan } : { momentum: null, volume: null, funding: null },
+        stats: running
+            ? snap.stats
+            : { momentum: zeroEngineStat(), volume: zeroEngineStat(), funding: zeroEngineStat(), updatedAt: 0 },
+        settings: engineHost.settings,
+        activeFunding: running
+            ? snap.activeFunding.map(entry => ({ symbol: entry.symbol, f8: entry.f8Pct / 100, since: entry.since }))
+            : [],
+        telegram: { server: !!(engineTelegram && engineTelegram.enabled) },
+        signalsToday: await countSignalsToday()
+    };
+};
+
+app.get('/api/engine/status', authenticateToken, async (req, res) => {
+    res.json(await buildEngineStatus());
+});
+
+// Global settings for everyone (admin only). Missing fields keep their current value; everything is
+// clamped by sanitizeSignalSettings. A changed threshold re-seeds that engine silently (no burst).
+app.put('/api/engine/settings', authenticateToken, requireAdmin, async (req, res) => {
+    if (!engineModule) {
+        return res.status(503).json({ error: 'Sinyal motoru bu sunucuda yüklü değil (server/build/engine.cjs yok).' });
+    }
+    const body = req.body;
+    if (!isPlainObject(body)) {
+        return res.status(400).json({ error: 'Geçersiz istek gövdesi: ayar nesnesi bekleniyor.' });
+    }
+    if (body.version !== undefined && body.version !== engineModule.SIGNAL_SETTINGS_VERSION) {
+        return res.status(400).json({ error: `Desteklenmeyen ayar sürümü (version: ${engineModule.SIGNAL_SETTINGS_VERSION} bekleniyor).` });
+    }
+    const current = engineHost.settings;
+    const section = (name) => ({ ...current[name], ...(isPlainObject(body[name]) ? body[name] : {}) });
+    const settings = engineModule.sanitizeSignalSettings({
+        version: engineModule.SIGNAL_SETTINGS_VERSION,
+        momentum: section('momentum'),
+        volume: section('volume'),
+        funding: section('funding')
+    });
+
+    if (engineHost.stateTable !== false) {
+        try {
+            await writeEngineState('settings', settings);
+        } catch (err) {
+            console.error('[engine] Motor ayarları kaydedilemedi:', err.code || err.message);
+            return res.status(500).json({ error: 'Motor ayarları kaydedilemedi. Lütfen tekrar deneyin.' });
+        }
+    }
+    applyEngineSettings(settings, { local: true });
+    console.log(`[engine] Motor ayarları güncellendi (kullanıcı: ${req.user.username}).`);
+    res.json({ settings });
+});
+
 // ===== HEALTH =====
 app.get('/health', async (req, res) => {
     try {
@@ -1373,6 +2114,37 @@ server.listen(PORT, HOST, () => {
     console.log(`🚀 Fidelio sunucusu çalışıyor: http://${HOST}:${port}`);
     console.log(`👉 Webhook: POST /api/webhook ${process.env.WEBHOOK_SECRET ? '(secret korumalı)' : '(WEBHOOK_SECRET tanımlı değil, devre dışı)'}`);
     console.log('🔐 JWT kimlik doğrulaması etkin');
+    console.log(`📡 Sinyal motoru: ${ENGINE_MODE === 'off' ? 'kapalı (ENGINE_MODE=off)' : engineModule ? 'sunucuda (kilit alınınca başlar)' : 'paket yok, devre dışı'}`);
+    startEngineHost().catch(err => console.error('[engine] Motor altyapısı başlatılamadı:', err && (err.code || err.message)));
 });
 
-module.exports = { app, server, io };
+let exitRequested = false;
+const exitGracefully = (signal) => {
+    if (exitRequested) return;
+    exitRequested = true;
+    console.log(`[server] ${signal} alındı: sinyal motoru durduruluyor, kilit bırakılıyor.`);
+    unrefTimer(setTimeout(() => process.exit(0), 5000));
+    shutdownEngineHost()
+        .catch(err => console.error('[engine] Kapanış sırasında hata:', err && (err.code || err.message)))
+        .finally(() => process.exit(0));
+};
+process.once('SIGTERM', () => exitGracefully('SIGTERM'));
+process.once('SIGINT', () => exitGracefully('SIGINT'));
+
+module.exports = {
+    app,
+    server,
+    io,
+    // Engine host internals, for tests and diagnostics only.
+    engineHost: {
+        state: engineHost,
+        getStatus: buildEngineStatus,
+        tryLockNow: tryBecomeLeader,
+        checkLockNow: checkEngineLock,
+        refreshShared: refreshSharedState,
+        publishSignals: handleEngineSignals,
+        persistCooldowns: scheduleCooldownWrite,
+        flushCooldowns,
+        shutdown: shutdownEngineHost
+    }
+};
