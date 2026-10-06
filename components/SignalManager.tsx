@@ -1,12 +1,28 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { Signal } from '../types';
-import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings, Percent, Activity } from 'lucide-react';
+import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings, Percent, Activity, Server, Info } from 'lucide-react';
 import { useSignals } from '../context/SignalContext';
+import { useUser } from '../context/UserContext';
 import { Modal } from './ui/Modal';
 import { formatPrice } from '../utils/formatters';
 import { SIGNAL_SETTINGS_LIMITS } from '../utils/signalEngines';
 import { FUNDING_THRESHOLDS } from '../utils/fundingSqueeze';
+import {
+    ENGINE_SCAN_KEYS,
+    ENGINE_SCAN_LABELS,
+    ENGINE_STREAM_KEYS,
+    ENGINE_STREAM_LABELS,
+    ENGINE_STREAM_STATE_LABELS,
+    ENGINE_TONE_DOT,
+    describeEngineHealth,
+    engineRestarts24h,
+    engineUptimeSec,
+    formatEngineAgo,
+    formatEngineDuration,
+    type EngineStatus,
+    type EngineStreamState
+} from '../utils/engineApi';
 import { getSideBadge, getSideKind, getSignalLabel, getMagnitude, SideKind } from './SignalFeed';
 
 // Quote every CSV cell, escape embedded quotes and neutralise spreadsheet formulas
@@ -96,21 +112,24 @@ const SettingInput: React.FC<{
     value: string;
     error: string | null;
     onChange: (value: string) => void;
+    // Non-admins see the global values without being able to change them.
+    readOnly?: boolean;
     children?: React.ReactNode;
-}> = ({ id, label, unit, step, hint, value, error, onChange, children }) => (
+}> = ({ id, label, unit, step, hint, value, error, onChange, readOnly = false, children }) => (
     <div className="min-w-0">
         <label htmlFor={id} className={LABEL_CLASS}>{label}</label>
-        <div className={`flex h-7 items-center rounded-sm border bg-surface-secondary focus-within:border-primary ${error ? 'border-danger' : 'border-border'}`}>
+        <div className={`flex h-7 items-center rounded-sm border focus-within:border-primary ${readOnly ? 'bg-surface' : 'bg-surface-secondary'} ${error ? 'border-danger' : 'border-border'}`}>
             <input
                 id={id}
                 type="number"
                 inputMode="decimal"
                 step={step}
                 value={value}
-                onChange={e => onChange(e.target.value)}
+                readOnly={readOnly}
+                onChange={e => { if (!readOnly) onChange(e.target.value); }}
                 aria-invalid={error ? true : undefined}
                 aria-describedby={`${id}-hint`}
-                className="h-full w-full min-w-0 bg-transparent px-2 font-mono text-xs text-text outline-none"
+                className={`h-full w-full min-w-0 bg-transparent px-2 font-mono text-xs outline-none ${readOnly ? 'cursor-default text-secondary' : 'text-text'}`}
             />
             <span className="shrink-0 pr-2 text-[11px] text-muted">{unit}</span>
         </div>
@@ -127,7 +146,8 @@ const SettingInput: React.FC<{
 );
 
 // "şu an N / M coin eşiğin ötesinde": how many symbols satisfy the SAVED threshold right now.
-// The engine refreshes these counts every few seconds; while a count is not available the line says so.
+// The server engine reports these counts (status polled every 15 s); while a count is not available the
+// line says so.
 const LiveCount: React.FC<{ stat: EngineCount | undefined; savedLabel: string; isDraftChanged: boolean }> = ({ stat, savedLabel, isDraftChanged }) => {
     const ready = !!stat && Number.isFinite(stat.matching) && Number.isFinite(stat.universe) && stat.universe > 0;
     return (
@@ -144,6 +164,99 @@ const LiveCount: React.FC<{ stat: EngineCount | undefined; savedLabel: string; i
     );
 };
 
+const STREAM_DOT: Record<EngineStreamState, string> = {
+    connected: 'bg-success',
+    connecting: 'bg-warning',
+    down: 'bg-danger'
+};
+
+const STATUS_CELL_CLASS = 'min-w-0 bg-surface px-2 py-1.5';
+const STATUS_LABEL_CLASS = 'truncate text-[10px] font-medium uppercase tracking-wider text-muted';
+const STATUS_VALUE_CLASS = 'mt-0.5 flex min-w-0 items-center gap-1.5 truncate font-mono text-xs text-text';
+
+const StatusCell: React.FC<{ label: string; title?: string; className?: string; children: React.ReactNode }> = ({ label, title, className = '', children }) => (
+    <div className={`${STATUS_CELL_CLASS} ${className}`} title={title}>
+        <div className={STATUS_LABEL_CLASS}>{label}</div>
+        <div className={STATUS_VALUE_CLASS}>{children}</div>
+    </div>
+);
+
+const engineStateText = (status: EngineStatus | null, error: string | null): string => {
+    if (!status) return error ? 'Alınamadı' : 'Bekleniyor';
+    if (status.mode === 'off') return 'Kapalı';
+    if (status.role === 'standby') return 'Beklemede';
+    return status.running ? 'Çalışıyor' : 'Çalışmıyor';
+};
+
+const formatBootTime = (at: number) =>
+    new Date(at).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+// "Motor durumu": state, uptime, restarts, data streams and the last scan of every engine.
+const EngineStatusBlock: React.FC<{ status: EngineStatus | null; error: string | null; receivedAt: number; now: number }> = ({ status, error, receivedAt, now: clock }) => {
+    // The dialog clock ticks every 5 s; a status received after the last tick must not look "from the future".
+    const now = Math.max(clock, receivedAt);
+    const health = describeEngineHealth(status, error, receivedAt, now);
+    const bootsInWindow = status ? status.boots.filter(t => t >= now - 24 * 60 * 60 * 1000) : [];
+    const restarts = status ? engineRestarts24h(status.boots, now) : null;
+    const lastBoot = status && status.boots.length > 0 ? status.boots[status.boots.length - 1] : null;
+    const bootTitle = [
+        lastBoot !== null ? `Son başlatma: ${formatBootTime(lastBoot)}` : '',
+        bootsInWindow.length > 0 ? `Son 24 saatteki başlatmalar: ${bootsInWindow.map(formatBootTime).join(', ')}` : ''
+    ].filter(Boolean).join(' · ') || undefined;
+    return (
+        <div className="space-y-2">
+            <h3 className={SECTION_TITLE_CLASS}>
+                <Server size={12} /> Motor durumu
+            </h3>
+            <div className="grid grid-cols-2 gap-px overflow-hidden rounded-sm border border-border bg-border sm:grid-cols-4">
+                <StatusCell label="Durum" title={health.text}>
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ENGINE_TONE_DOT[health.tone]}`} />
+                    <span className="truncate font-sans">{engineStateText(status, error)}</span>
+                </StatusCell>
+                <StatusCell label="Çalışma süresi">
+                    {status ? formatEngineDuration(engineUptimeSec(status, receivedAt, now)) : '—'}
+                </StatusCell>
+                <StatusCell label="Yeniden başlama" title={bootTitle}>
+                    {restarts === null ? '—' : <>{restarts} <span className="font-sans text-[11px] text-muted">son 24 sa</span></>}
+                </StatusCell>
+                <StatusCell label="Bugün (UTC)">
+                    {status ? `${status.signalsToday} kayıt` : '—'}
+                </StatusCell>
+                {ENGINE_STREAM_KEYS.map(key => (
+                    <StatusCell key={key} label={ENGINE_STREAM_LABELS[key]}>
+                        {status ? (
+                            <>
+                                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STREAM_DOT[status.streams[key]]}`} />
+                                <span className="truncate font-sans">{ENGINE_STREAM_STATE_LABELS[status.streams[key]]}</span>
+                            </>
+                        ) : '—'}
+                    </StatusCell>
+                ))}
+                <div className={`${STATUS_CELL_CLASS} col-span-2 sm:col-span-3`}>
+                    <div className={STATUS_LABEL_CLASS}>Son tarama</div>
+                    <div className="mt-0.5 flex flex-wrap gap-x-3 font-mono text-xs text-text">
+                        {ENGINE_SCAN_KEYS.map(key => (
+                            <span key={key} className="whitespace-nowrap">
+                                <span className="font-sans text-secondary">{ENGINE_SCAN_LABELS[key]}</span>{' '}
+                                {status ? formatEngineAgo(status.lastScan[key], now) : '—'}
+                            </span>
+                        ))}
+                    </div>
+                </div>
+                <StatusCell label="Sunucu Telegram" className="col-span-2 sm:col-span-1" title="Açıkken motor kayıtlarını Telegram'a sunucu bir kez gönderir; tarayıcı ayrıca göndermez.">
+                    <span className="font-sans">{status ? (status.telegram.server ? 'açık' : 'kapalı') : '—'}</span>
+                </StatusCell>
+            </div>
+            {health.tone !== 'success' && (
+                <p className={`flex items-start gap-1 text-[11px] leading-snug ${health.tone === 'danger' ? 'text-danger' : 'text-warning'}`}>
+                    <AlertCircle size={11} className="mt-px shrink-0" />
+                    <span>{health.text}</span>
+                </p>
+            )}
+        </div>
+    );
+};
+
 interface SignalManagerProps {
     signals: Signal[];
     onDelete: (id: string) => void;
@@ -151,7 +264,10 @@ interface SignalManagerProps {
 }
 
 export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete, onClearAll }) => {
-    const { signalSettings, updateSignalSettings, engineStats } = useSignals();
+    const { signalSettings, updateSignalSettings, engineStats, engineStatus, engineStatusError, engineStatusAt } = useSignals();
+    const { isAdmin } = useUser();
+    // Settings are global (server engine): only an admin can edit them, everyone else reads them.
+    const readOnly = !isAdmin;
     const [searchTerm, setSearchTerm] = useState('');
     const [sideFilter, setSideFilter] = useState<'ALL' | SideKind>('ALL');
     const [strategyFilter, setStrategyFilter] = useState<string>('ALL');
@@ -159,10 +275,20 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
     // Settings Modal State (inputs are kept as raw strings and validated while typing)
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draft, setDraft] = useState<SettingsDraft>(() => toDraft(signalSettings));
+    const [isSaving, setIsSaving] = useState(false);
+    // Clock for the "… önce" texts of the status block; ticks only while the dialog is open.
+    const [now, setNow] = useState(() => Date.now());
 
     useEffect(() => {
         if (isSettingsOpen) setDraft(toDraft(signalSettings));
     }, [isSettingsOpen, signalSettings]);
+
+    useEffect(() => {
+        if (!isSettingsOpen) return;
+        setNow(Date.now());
+        const timer = setInterval(() => setNow(Date.now()), 5000);
+        return () => clearInterval(timer);
+    }, [isSettingsOpen]);
 
     const updateDraft = (field: SettingsField, value: string) => {
         setDraft(prev => ({ ...prev, [field]: value }));
@@ -175,22 +301,25 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
     }, [draft]);
     const hasSettingsError = SETTING_FIELDS.some(field => checked[field].error !== null);
 
-    const handleSaveSettings = () => {
-        if (hasSettingsError) return;
-        updateSignalSettings({
+    const handleSaveSettings = async () => {
+        if (hasSettingsError || readOnly || isSaving) return;
+        setIsSaving(true);
+        const saved = await updateSignalSettings({
             version: 2,
             momentum: { threshold: checked.momThreshold.value!, cooldownHours: checked.momCooldown.value! },
             volume: { ratio: checked.volRatio.value!, cooldownHours: checked.volCooldown.value! },
             funding: { thresholdPct: checked.fundingThreshold.value!, cooldownHours: checked.fundingCooldown.value! }
         });
-        setIsSettingsOpen(false);
+        setIsSaving(false);
+        // On failure the dialog stays open with the draft (the context showed the reason as a toast).
+        if (saved) setIsSettingsOpen(false);
     };
 
     // The live counters describe the saved thresholds; say so while the draft differs from them.
     const savedMomentum = signalSettings?.momentum?.threshold;
     const savedVolume = signalSettings?.volume?.ratio;
     const savedFunding = signalSettings?.funding?.thresholdPct;
-    const draftDiffers = (field: SettingsField, saved: number | undefined) => parseDecimal(draft[field]) !== (saved ?? null);
+    const draftDiffers = (field: SettingsField, saved: number | undefined) => !readOnly && parseDecimal(draft[field]) !== (saved ?? null);
 
     // Extract unique strategies for the filter dropdown
     const uniqueStrategies = useMemo(() => {
@@ -247,11 +376,22 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
             {/* Settings Modal */}
             <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Sinyal kuralları" maxWidth="max-w-xl">
                 <div className="space-y-3">
-                    <p className={RULE_TEXT_CLASS}>
-                        Üç kural bu tarayıcıda, Binance'in herkese açık verisiyle çalışır. Kayıtlar yalnızca ölçülen durumu bildirir;
-                        tahmin ya da işlem önerisi değildir. Bir eşiği değiştirdiğinizde o kural sessizce yeniden başlar:
-                        o an eşiğin ötesinde olan coinler için toplu kayıt açılmaz.
+                    <p className="flex items-start gap-1.5 rounded-sm border border-border bg-surface-secondary px-2 py-1.5 text-[11px] leading-snug text-text">
+                        <Info size={12} className="mt-px shrink-0 text-secondary" />
+                        <span>
+                            Bu ayarlar sunucudaki sinyal motoru içindir ve tüm kullanıcılar için ortaktır.
+                            {readOnly && <span className="text-secondary"> Yalnızca yönetici değiştirebilir.</span>}
+                        </span>
                     </p>
+                    <p className={RULE_TEXT_CLASS}>
+                        Üç kural sunucuda, günün her saati Binance'in herkese açık verisiyle çalışır; kayıtlar veritabanına yazılır
+                        ve her cihazda aynı görünür. Kayıtlar yalnızca ölçülen durumu bildirir; tahmin ya da işlem önerisi değildir.
+                        Bir eşik değiştiğinde o kural sessizce yeniden başlar: o an eşiğin ötesinde olan coinler için toplu kayıt açılmaz.
+                    </p>
+
+                    <div className="border-t border-border pt-3">
+                        <EngineStatusBlock status={engineStatus} error={engineStatusError} receivedAt={engineStatusAt} now={now} />
+                    </div>
 
                     {/* Momentum */}
                     <div className="space-y-2 border-t border-border pt-3">
@@ -268,6 +408,7 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                         <div className="grid grid-cols-2 gap-3">
                             <SettingInput
                                 id="signal-mom-threshold"
+                                readOnly={readOnly}
                                 label="24s değişim eşiği"
                                 unit="%"
                                 step="0.5"
@@ -284,6 +425,7 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                             </SettingInput>
                             <SettingInput
                                 id="signal-mom-cooldown"
+                                readOnly={readOnly}
                                 label="Bekleme (aynı coin ve yön)"
                                 unit="saat"
                                 step="1"
@@ -309,6 +451,7 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                         <div className="grid grid-cols-2 gap-3">
                             <SettingInput
                                 id="signal-vol-ratio"
+                                readOnly={readOnly}
                                 label="Oran eşiği"
                                 unit="kat"
                                 step="0.5"
@@ -325,6 +468,7 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                             </SettingInput>
                             <SettingInput
                                 id="signal-vol-cooldown"
+                                readOnly={readOnly}
                                 label="Bekleme (aynı coin)"
                                 unit="saat"
                                 step="1"
@@ -345,11 +489,12 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                             Kripto perp kontratlarında tahmini fonlama oranı 8 saatlik eşdeğere çevrilir. Sınır, şu üçünden en negatif
                             olanıdır: girdiğiniz eşik, sabit {FUNDING_FLOOR_TEXT} ve tüm kontratların en negatif %2'lik dilim sınırı. Oran bu
                             sınırın altına inip en az 60 saniye orada kalırsa ya da işareti pozitiften negatife dönerse kayıt açılır.
-                            Kayıt yönsüzdür. Uygulama açıldığında zaten sınırın altında olan kontratlar için kayıt açılmaz.
+                            Kayıt yönsüzdür. Motor başladığında zaten sınırın altında olan kontratlar için kayıt açılmaz.
                         </p>
                         <div className="grid grid-cols-2 gap-3">
                             <SettingInput
                                 id="signal-funding-threshold"
+                                readOnly={readOnly}
                                 label="Fonlama eşiği (8s eşdeğeri)"
                                 unit="%"
                                 step="0.01"
@@ -366,6 +511,7 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                             </SettingInput>
                             <SettingInput
                                 id="signal-funding-cooldown"
+                                readOnly={readOnly}
                                 label="Bekleme (aynı coin)"
                                 unit="saat"
                                 step="1"
@@ -378,22 +524,27 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                     </div>
 
                     <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
-                        {hasSettingsError && (
+                        {!readOnly && hasSettingsError && (
                             <span className="mr-auto text-[11px] text-danger">Kaydetmek için işaretli alanları düzeltin.</span>
+                        )}
+                        {readOnly && (
+                            <span className="mr-auto text-[11px] text-muted">Salt okunur: ayarları yalnızca yönetici değiştirebilir.</span>
                         )}
                         <button
                             onClick={() => setIsSettingsOpen(false)}
                             className="h-7 rounded-sm px-2.5 text-xs font-medium text-secondary transition-colors hover:bg-surface-secondary hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
                         >
-                            Vazgeç
+                            {readOnly ? 'Kapat' : 'Vazgeç'}
                         </button>
-                        <button
-                            onClick={handleSaveSettings}
-                            disabled={hasSettingsError}
-                            className="h-7 rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-contrast transition-colors hover:opacity-90 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                            Kaydet
-                        </button>
+                        {!readOnly && (
+                            <button
+                                onClick={handleSaveSettings}
+                                disabled={hasSettingsError || isSaving}
+                                className="h-7 rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-contrast transition-colors hover:opacity-90 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                {isSaving ? 'Kaydediliyor…' : 'Kaydet'}
+                            </button>
+                        )}
                     </div>
                 </div>
             </Modal>

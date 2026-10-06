@@ -69,3 +69,28 @@ CREATE TABLE IF NOT EXISTS trade_history (
     INDEX idx_symbol (symbol),
     INDEX idx_timestamp (timestamp)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ===== Server-side signal engine (server/index.cjs creates both tables at start with
+-- CREATE TABLE IF NOT EXISTS. Without the CREATE privilege, run these two statements once by hand.)
+-- No semicolons inside comments: server/migrate.cjs splits this file on them. =====
+
+-- Shared engine state, one JSON value per key:
+--   'settings'  : global engine settings (SignalSettings, version 2), edited by admins via PUT /api/engine/settings
+--   'cooldowns' : per-symbol cooldown stamps of the three engines (written at most every 10 s, reloaded on start
+--                 so that a restart does not re-announce a signal)
+--   'boots'     : the last 50 process start times (ms), to see whether the host keeps the process alive
+CREATE TABLE IF NOT EXISTS engine_state (
+    k VARCHAR(64) PRIMARY KEY,
+    v LONGTEXT,
+    updated_at BIGINT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Engine + measured size of engine signals (source ALGO_MOMENTUM / ALGO_VOLUME / ALGO_DIVERGENCE).
+-- signal_id = signals.id, engine = 'MOMENTUM' | 'VOLUME' | 'FUNDING',
+-- magnitude = JSON {"value": 5.4, "text": "5.4x", "caption": "son 1 saat hacmi / 24s ortalama saat"}.
+-- GET /api/signals and the socket event 'new_signal' return both fields on the signal.
+CREATE TABLE IF NOT EXISTS signal_meta (
+    signal_id VARCHAR(50) PRIMARY KEY,
+    engine VARCHAR(16),
+    magnitude TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
