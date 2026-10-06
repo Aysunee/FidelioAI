@@ -1,8 +1,22 @@
 import React, { useState, useEffect } from 'react';
-import { Database, RefreshCw, Search, Trash2, Download } from 'lucide-react';
+import { Database, RefreshCw, Search, Download, ShieldAlert, Zap } from 'lucide-react';
 import { Signal } from '../types';
+import { apiJson, ApiError } from '../utils/config';
+import { useUser } from '../context/UserContext';
+import { getStrategyLabel } from '../context/SignalContext';
+
+const INPUT_CLASS = 'h-7 rounded-sm border border-border bg-surface-secondary px-2 text-xs text-text placeholder:text-muted outline-none focus:border-primary';
+const HEADER_BUTTON_CLASS = 'flex h-6 items-center gap-1.5 rounded-sm border border-border bg-surface-secondary px-2 text-[11px] font-medium text-text transition-colors hover:bg-surface-highlight focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
+const PAGE_BUTTON_CLASS = 'h-6 rounded-sm border border-border bg-surface-secondary px-2 text-[11px] font-medium text-text transition-colors hover:bg-surface-highlight focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50';
+const TH_CLASS = 'sticky top-0 z-10 h-7 border-b border-border bg-surface px-3 text-[10px] font-medium uppercase tracking-wider text-muted';
+const TD_CLASS = 'h-7 border-b border-border px-3';
 
 export const DatabaseViewer: React.FC = () => {
+    const { user } = useUser();
+    const isAdmin = user?.role === 'admin';
+    // The test-signal tool writes to the real DB and broadcasts to everyone,
+    // so it only exists in development builds (and only for admins).
+    const canSendTestSignal = isAdmin && Boolean(import.meta.env.DEV);
     const [signals, setSignals] = useState<Signal[]>([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
@@ -15,14 +29,9 @@ export const DatabaseViewer: React.FC = () => {
     const fetchSignals = async () => {
         setLoading(true);
         try {
-            const res = await fetch('http://localhost:3001/api/signals');
-            if (res.ok) {
-                const data = await res.json();
-                setSignals(data);
-                setServerStatus('online');
-            } else {
-                setServerStatus('offline');
-            }
+            const data = await apiJson<Signal[]>('/api/signals?limit=500');
+            setSignals(Array.isArray(data) ? data : []);
+            setServerStatus('online');
         } catch (error) {
             console.error('Failed to fetch DB:', error);
             setServerStatus('offline');
@@ -31,44 +40,39 @@ export const DatabaseViewer: React.FC = () => {
         }
     };
 
+    // Writes a REAL signal to the production DB and broadcasts it to every user,
+    // so it is dev-only + admin-only (server enforces admin too) and requires explicit confirmation.
     const sendTestSignal = async () => {
+        if (!canSendTestSignal) return;
+        if (typeof window === 'undefined' || !window.confirm(
+            'Bu işlem veritabanına gerçek bir test sinyali (TESTUSDT) yazacak ve TÜM kullanıcılara canlı olarak yayınlayacak. Devam edilsin mi?'
+        )) return;
         try {
-            const res = await fetch('http://localhost:3001/api/webhook', {
+            await apiJson('/api/signals', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    id: `test_${Date.now()}`,
-                    symbol: 'TEST-USDT',
+                    symbol: 'TESTUSDT',
                     side: 'BUY',
                     price: 12345.67,
                     strategy: 'Manual_Test_Signal',
-                    note: 'Database Connectivity Check',
-                    source: 'TEST_BUTTON'
+                    note: 'Veritabanı bağlantı testi',
+                    source: 'MANUAL'
                 })
             });
-            if (res.ok) {
-                alert('Test Signal Sent! Refreshing...');
-                fetchSignals();
-            } else {
-                alert('Failed to send signal. Server returned error.');
-            }
+            alert('Test sinyali gönderildi, liste yenileniyor...');
+            fetchSignals();
         } catch (err) {
-            alert('Failed to connect to server. Is it running?');
+            const message = err instanceof ApiError ? err.message : 'Sunucuya bağlanılamadı.';
+            alert(`Test sinyali gönderilemedi: ${message}`);
         }
     };
 
     useEffect(() => {
-        fetchSignals();
-    }, []);
+        if (isAdmin) fetchSignals();
+    }, [isAdmin]);
 
     const [currentPage, setCurrentPage] = useState(1);
     const itemsPerPage = 50;
-
-    // ... (fetch logic remains same)
-
-    useEffect(() => {
-        fetchSignals();
-    }, []);
 
     // Extract unique strategies for filter dropdown
     const strategies = ['ALL', ...Array.from(new Set(signals.map(s => s.strategy)))].sort();
@@ -105,77 +109,84 @@ export const DatabaseViewer: React.FC = () => {
         downloadAnchorNode.remove();
     };
 
+    if (!isAdmin) {
+        return (
+            <div className="flex h-full min-h-[120px] w-full flex-1 items-center justify-center gap-2 bg-surface px-3 text-xs text-muted">
+                <ShieldAlert size={14} className="shrink-0 text-danger" />
+                Bu görünüm yalnızca yöneticiler içindir.
+            </div>
+        );
+    }
+
     return (
-        <div className="h-full flex flex-col bg-[#0B0C10] text-gray-300 p-6 overflow-hidden">
+        <section className="flex h-full min-h-0 w-full flex-1 flex-col bg-surface">
             {/* Header */}
-            <div className="flex justify-between items-center mb-6">
-                <div className="flex items-center gap-3">
-                    <div className="p-2 bg-gradient-to-br from-blue-600/20 to-cyan-600/20 rounded-lg border border-blue-500/20 shadow-[0_0_15px_rgba(59,130,246,0.2)]">
-                        <Database size={24} className="text-blue-400" />
-                    </div>
-                    <div>
-                        <div className="flex items-center gap-2">
-                            <h1 className="text-2xl font-bold bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">Database Viewer</h1>
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full border ${serverStatus === 'online' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' :
-                                    serverStatus === 'offline' ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' :
-                                        'bg-gray-500/10 text-gray-400 border-gray-500/30'
-                                }`}>
-                                {serverStatus === 'online' ? 'CONNECTED' : serverStatus === 'offline' ? 'DISCONNECTED' : 'CHECKING...'}
-                            </span>
-                        </div>
-                        <p className="text-xs text-gray-500">
-                            {signals.length.toLocaleString()} records stored • {filteredSignals.length.toLocaleString()} filtering match
-                        </p>
-                    </div>
+            <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+                <div className="flex min-w-0 items-center gap-2">
+                    <h1 className="flex shrink-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-secondary">
+                        <Database size={12} />
+                        Database Viewer
+                    </h1>
+                    <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 ${serverStatus === 'online' ? 'bg-success-soft text-success' :
+                        serverStatus === 'offline' ? 'bg-danger-soft text-danger' :
+                            'bg-surface-secondary text-secondary'
+                        }`}>
+                        {serverStatus === 'online' ? 'CONNECTED' : serverStatus === 'offline' ? 'DISCONNECTED' : 'CHECKING...'}
+                    </span>
+                    <p className="hidden truncate font-mono text-[11px] text-muted lg:block">
+                        {signals.length.toLocaleString()} records stored • {filteredSignals.length.toLocaleString()} filtering match
+                    </p>
                 </div>
-                <div className="flex gap-2">
-                    <button
-                        onClick={sendTestSignal}
-                        className="flex items-center gap-2 px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 rounded-lg transition-colors text-xs font-medium border border-purple-500/20"
-                    >
-                        ⚡ Test Signal
-                    </button>
+                <div className="flex shrink-0 items-center gap-1">
+                    {canSendTestSignal && (
+                        <button
+                            onClick={sendTestSignal}
+                            className="flex h-6 items-center gap-1.5 rounded-sm bg-primary-soft px-2 text-[11px] font-medium text-primary transition-colors hover:opacity-80 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
+                        >
+                            <Zap size={12} />
+                            <span className="hidden sm:inline">Test Signal</span>
+                        </button>
+                    )}
                     <button
                         onClick={downloadJSON}
-                        className="flex items-center gap-2 px-3 py-1.5 bg-white/5 hover:bg-white/10 rounded-lg transition-colors text-xs font-medium border border-white/10"
+                        className={HEADER_BUTTON_CLASS}
                     >
-                        <Download size={14} />
-                        Export
+                        <Download size={12} />
+                        <span className="hidden sm:inline">Export</span>
                     </button>
                     <button
                         onClick={fetchSignals}
-                        className="flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-lg transition-colors text-xs font-medium border border-blue-500/20"
+                        className={HEADER_BUTTON_CLASS}
                     >
-                        <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-                        Refresh
+                        <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+                        <span className="hidden sm:inline">Refresh</span>
                     </button>
                 </div>
-            </div>
+            </header>
 
             {/* Filters & Search */}
-            <div className="mb-4 flex gap-4 backdrop-blur-xl bg-white/5 p-3 rounded-xl border border-white/10">
-                <div className="relative flex-1">
-                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1">
+                <div className="relative min-w-[160px] flex-1 sm:max-w-[280px]">
+                    <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted" />
                     <input
                         type="text"
                         placeholder="Search Symbol, Note or ID..."
                         value={searchTerm}
                         onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
-                        className="w-full bg-black/40 border border-white/10 rounded-lg pl-10 pr-4 py-2 text-sm focus:outline-none focus:border-blue-500/50 transition-colors text-gray-200 placeholder-gray-600"
+                        className={`${INPUT_CLASS} w-full pl-7`}
                     />
                 </div>
-                <div className="h-full w-px bg-white/10 mx-2"></div>
                 <select
                     value={filterStrategy}
                     onChange={(e) => { setFilterStrategy(e.target.value); setCurrentPage(1); }}
-                    className="bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500/50 transition-colors text-gray-300 min-w-[160px]"
+                    className={`${INPUT_CLASS} max-w-[180px]`}
                 >
-                    {strategies.map(s => <option key={s} value={s}>{s === 'ALL' ? 'All Strategies' : s}</option>)}
+                    {strategies.map(s => <option key={s} value={s}>{s === 'ALL' ? 'All Strategies' : getStrategyLabel(s)}</option>)}
                 </select>
                 <select
                     value={filterSide}
                     onChange={(e) => { setFilterSide(e.target.value); setCurrentPage(1); }}
-                    className="bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500/50 transition-colors text-gray-300 min-w-[120px]"
+                    className={INPUT_CLASS}
                 >
                     <option value="ALL">All Sides</option>
                     <option value="BUY">BUY / LONG</option>
@@ -183,114 +194,115 @@ export const DatabaseViewer: React.FC = () => {
                 </select>
             </div>
 
-            {/* Table Container */}
-            <div className="flex-1 overflow-hidden border border-white/10 rounded-xl bg-black/20 flex flex-col">
-                <div className="overflow-auto flex-1 custom-scrollbar">
-                    <table className="w-full text-left text-sm whitespace-nowrap">
-                        <thead className="bg-[#16181D] sticky top-0 z-10 shadow-sm">
+            {/* Table */}
+            <div className="min-h-0 flex-1 overflow-auto">
+                <table className="w-full border-separate border-spacing-0 whitespace-nowrap text-left text-xs">
+                    <thead>
+                        <tr>
+                            <th className={TH_CLASS}>Time</th>
+                            <th className={TH_CLASS}>Symbol</th>
+                            <th className={TH_CLASS}>Side</th>
+                            <th className={`${TH_CLASS} text-right`}>Price</th>
+                            <th className={TH_CLASS}>Strategy</th>
+                            <th className={TH_CLASS}>Source</th>
+                            <th className={`${TH_CLASS} w-full min-w-[200px]`}>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {loading ? (
                             <tr>
-                                <th className="p-3 pl-4 font-mono text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Time</th>
-                                <th className="p-3 font-mono text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Symbol</th>
-                                <th className="p-3 font-mono text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Side</th>
-                                <th className="p-3 font-mono text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Price</th>
-                                <th className="p-3 font-mono text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Strategy</th>
-                                <th className="p-3 font-mono text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Source</th>
-                                <th className="p-3 font-mono text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Note</th>
+                                <td colSpan={7} className="px-3 py-8 text-center text-xs text-muted">
+                                    <RefreshCw className="mr-2 inline animate-spin align-[-2px]" size={14} />
+                                    Loading database...
+                                </td>
                             </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/5">
-                            {loading ? (
-                                <tr>
-                                    <td colSpan={7} className="p-20 text-center text-gray-500">
-                                        <RefreshCw className="animate-spin mx-auto mb-2 opacity-50" size={24} />
-                                        Loading database...
+                        ) : filteredSignals.length === 0 ? (
+                            <tr>
+                                <td colSpan={7} className="px-3 py-8 text-center text-xs text-muted">
+                                    No records match your filters.
+                                </td>
+                            </tr>
+                        ) : (
+                            paginatedSignals.map((signal, idx) => (
+                                <tr key={signal.id || idx} className="hover:bg-surface-secondary">
+                                    <td className={`${TD_CLASS} font-mono text-[11px] text-secondary`}>
+                                        {new Date(signal.time).toLocaleDateString()} <span className="text-muted">{new Date(signal.time).toLocaleTimeString()}</span>
+                                    </td>
+                                    <td className={TD_CLASS}>
+                                        <span className="font-medium text-text">{signal.symbol}</span>
+                                    </td>
+                                    <td className={TD_CLASS}>
+                                        <span className={`rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase ${signal.side === 'NEUTRAL'
+                                            ? 'bg-surface-secondary text-secondary'
+                                            : signal.side === 'BUY' || signal.side === 'LONG'
+                                                ? 'bg-success-soft text-success'
+                                                : 'bg-danger-soft text-danger'
+                                            }`}>
+                                            {signal.side === 'NEUTRAL' ? 'Yönsüz' : signal.side}
+                                        </span>
+                                    </td>
+                                    <td className={`${TD_CLASS} text-right font-mono text-text`}>
+                                        ${signal.price.toFixed(signal.price < 1 ? 5 : 2)}
+                                    </td>
+                                    <td className={`${TD_CLASS} text-secondary`}>
+                                        {getStrategyLabel(signal.strategy)}
+                                    </td>
+                                    <td className={TD_CLASS}>
+                                        <span className={`rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase ${signal.source === 'WEBHOOK' ? 'bg-primary-soft text-primary' :
+                                            (signal.source as string | undefined) === 'TEST_BUTTON' ? 'bg-surface-secondary text-secondary' :
+                                                'bg-warning-soft text-warning'
+                                            }`}>
+                                            {signal.source || 'UNKNOWN'}
+                                        </span>
+                                    </td>
+                                    {/* w-full + max-w-0: the note takes the spare width and truncates instead of widening the table */}
+                                    <td className={`${TD_CLASS} w-full max-w-0 truncate text-muted`} title={signal.note}>
+                                        {signal.note}
                                     </td>
                                 </tr>
-                            ) : filteredSignals.length === 0 ? (
-                                <tr>
-                                    <td colSpan={7} className="p-20 text-center text-gray-500">
-                                        No records match your filters.
-                                    </td>
-                                </tr>
-                            ) : (
-                                paginatedSignals.map((signal, idx) => (
-                                    <tr key={signal.id || idx} className="hover:bg-white/5 transition-colors group">
-                                        <td className="p-3 pl-4 text-gray-400 text-xs font-mono">
-                                            {new Date(signal.time).toLocaleDateString()} <span className="text-gray-600">{new Date(signal.time).toLocaleTimeString()}</span>
-                                        </td>
-                                        <td className="p-3">
-                                            <span className="font-bold text-gray-200">{signal.symbol}</span>
-                                        </td>
-                                        <td className="p-3">
-                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${signal.side === 'BUY' || signal.side === 'LONG'
-                                                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                                                    : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                                                }`}>
-                                                {signal.side}
-                                            </span>
-                                        </td>
-                                        <td className="p-3 font-mono text-gray-300">
-                                            ${signal.price.toFixed(signal.price < 1 ? 5 : 2)}
-                                        </td>
-                                        <td className="p-3">
-                                            <span className="text-blue-300 text-xs">{signal.strategy}</span>
-                                        </td>
-                                        <td className="p-3">
-                                            <span className={`text-[10px] px-1.5 py-0.5 rounded border ${signal.source === 'WEBHOOK' ? 'border-purple-500/30 text-purple-400' :
-                                                    signal.source === 'TEST_BUTTON' ? 'border-gray-500/30 text-gray-500' :
-                                                        'border-amber-500/30 text-amber-400'
-                                                }`}>
-                                                {signal.source || 'UNKNOWN'}
-                                            </span>
-                                        </td>
-                                        <td className="p-3 max-w-[300px] truncate text-gray-500 text-xs" title={signal.note}>
-                                            {signal.note}
-                                        </td>
-                                    </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
-                </div>
+                            ))
+                        )}
+                    </tbody>
+                </table>
+            </div>
 
-                {/* Pagination Footer */}
-                <div className="border-t border-white/10 p-3 bg-[#111216] flex items-center justify-between text-xs">
-                    <div className="text-gray-500">
-                        Showing {(currentPage - 1) * itemsPerPage + 1} to {Math.min(currentPage * itemsPerPage, filteredSignals.length)} of {filteredSignals.length} records
+            {/* Pagination Footer */}
+            <div className="flex h-8 shrink-0 items-center justify-between gap-2 border-t border-border px-3 text-[11px]">
+                <div className="truncate text-muted">
+                    Showing {(currentPage - 1) * itemsPerPage + 1} to {Math.min(currentPage * itemsPerPage, filteredSignals.length)} of {filteredSignals.length} records
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                    <button
+                        disabled={currentPage === 1}
+                        onClick={() => handlePageChange(currentPage - 1)}
+                        className={PAGE_BUTTON_CLASS}
+                    >
+                        Previous
+                    </button>
+                    <div className="flex items-center gap-1">
+                        {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                            // Simple logic to show window of pages around current
+                            let p = i + 1;
+                            if (totalPages > 5) {
+                                if (currentPage > 3) p = currentPage - 2 + i;
+                                if (p > totalPages) p = 1 + (i - (totalPages - currentPage)); // simple fallback, mostly works
+                                // Let's just do simple first 5 or simpler text input for massive pages
+                            }
+                            return null;
+                        })}
+                        <span className="px-2 font-mono text-text">
+                            Page {currentPage} of {totalPages}
+                        </span>
                     </div>
-                    <div className="flex gap-2">
-                        <button
-                            disabled={currentPage === 1}
-                            onClick={() => handlePageChange(currentPage - 1)}
-                            className="px-3 py-1 rounded bg-white/5 border border-white/10 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                        >
-                            Previous
-                        </button>
-                        <div className="flex items-center gap-1">
-                            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                                // Simple logic to show window of pages around current
-                                let p = i + 1;
-                                if (totalPages > 5) {
-                                    if (currentPage > 3) p = currentPage - 2 + i;
-                                    if (p > totalPages) p = 1 + (i - (totalPages - currentPage)); // simple fallback, mostly works
-                                    // Let's just do simple first 5 or simpler text input for massive pages
-                                }
-                                return null;
-                            })}
-                            <span className="px-3 py-1 rounded bg-blue-600/20 text-blue-400 font-bold border border-blue-600/30">
-                                Page {currentPage} of {totalPages}
-                            </span>
-                        </div>
-                        <button
-                            disabled={currentPage === totalPages}
-                            onClick={() => handlePageChange(currentPage + 1)}
-                            className="px-3 py-1 rounded bg-white/5 border border-white/10 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                        >
-                            Next
-                        </button>
-                    </div>
+                    <button
+                        disabled={currentPage === totalPages}
+                        onClick={() => handlePageChange(currentPage + 1)}
+                        className={PAGE_BUTTON_CLASS}
+                    >
+                        Next
+                    </button>
                 </div>
             </div>
-        </div>
+        </section>
     );
 };

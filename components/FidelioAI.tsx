@@ -1,14 +1,17 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Ticker, FuturesTicker } from '../types';
-import { Card } from './ui/Card';
 import { generateAIResponse, ChatMessage } from '../services/aiService';
-import { Send, Bot, User, Sparkles, Globe, RotateCcw, Search } from 'lucide-react';
+import { Send, Globe, RotateCcw, Loader2 } from 'lucide-react';
 
 interface FidelioAIProps {
   spotData: Record<string, Ticker>;
   futuresData: Record<string, FuturesTicker>;
 }
+
+// Role column + message column, shared by every row of the log so the text lines up.
+const ROW_GRID = 'grid grid-cols-[56px_minmax(0,1fr)] gap-x-3 border-b border-border px-3 py-2 sm:grid-cols-[72px_minmax(0,1fr)]';
+const ROLE_LABEL = 'text-[10px] font-semibold uppercase tracking-wider';
 
 export const FidelioAI: React.FC<FidelioAIProps> = ({ spotData, futuresData }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -66,163 +69,137 @@ export const FidelioAI: React.FC<FidelioAIProps> = ({ spotData, futuresData }) =
   ];
 
   return (
-    <div className="h-full grid grid-cols-1 lg:grid-cols-12 gap-6">
-       
-       {/* Left Panel: Context & Quick Actions */}
-       <div className="lg:col-span-3 flex flex-col gap-4">
-          <Card title="Intelligence Parameters" className="shrink-0">
-             <div className="p-4 space-y-4">
-                <div className="flex items-center gap-3 text-sm text-secondary">
-                    <div className="flex items-center gap-2">
-                        <span className="relative flex h-2 w-2">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                        </span>
-                        Live Feeds
-                    </div>
-                    <div className="w-[1px] h-4 bg-border"></div>
-                    <div className="flex items-center gap-2">
-                        <Globe size={12} />
-                        Google Search
-                    </div>
-                </div>
-                
-                <div className="text-xs text-secondary bg-surface-secondary p-3 rounded-lg border border-border">
-                    Current Context:
-                    <div className="font-mono text-primary mt-1">
-                        {Object.keys(spotData).length} Pairs, {Object.keys(futuresData).length} Contracts
-                    </div>
-                </div>
-             </div>
-          </Card>
+    // Fills the view at every width (flex-1 inside the shell's column, h-full inside a grid cell); only the
+    // message log scrolls, so the input bar stays pinned at the bottom.
+    <section className="flex w-full flex-1 flex-col bg-surface lg:h-full lg:min-h-0" aria-label="Fidelio.ai Analyst">
+       {/* Header */}
+       <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border pl-3 pr-1">
+          <div className="flex min-w-0 items-baseline gap-2">
+             <h2 className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-secondary">Fidelio.ai Analyst</h2>
+             <span className="truncate text-[10px] uppercase tracking-wider text-muted">Gemini 2.5 Flash • Search Grounding Enabled</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setMessages([])}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-sm text-secondary transition-colors hover:bg-surface-secondary hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
+            title="Reset Session"
+            aria-label="Reset Session"
+          >
+             <RotateCcw size={14} />
+          </button>
+       </header>
 
-          <Card title="Quick Protocols" className="flex-1">
-             <div className="p-4 flex flex-col gap-2">
-                {QUICK_PROMPTS.map((prompt, idx) => (
-                    <button
-                        key={idx}
-                        onClick={() => handleSend(prompt)}
-                        className="text-left text-xs font-medium p-3 rounded-lg bg-surface-secondary hover:bg-surface-highlight border border-transparent hover:border-primary/30 transition-all flex items-center justify-between group"
-                    >
-                        {prompt}
-                        <Search size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-primary" />
-                    </button>
-                ))}
-             </div>
-          </Card>
+       {/* Intelligence Parameters: one status line */}
+       <div
+         className="flex h-7 shrink-0 items-center gap-3 overflow-x-auto whitespace-nowrap border-b border-border px-3 text-[11px] text-secondary scrollbar-hide"
+         role="group"
+         aria-label="Intelligence Parameters"
+       >
+          <span className="hidden text-[10px] uppercase tracking-wider text-muted md:inline">Intelligence Parameters</span>
+          <span className="flex items-center gap-1.5">
+             <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse" aria-hidden="true"></span>
+             Live Feeds
+          </span>
+          <span className="flex items-center gap-1.5">
+             <Globe size={12} className="shrink-0" />
+             Google Search
+          </span>
+          <span className="ml-auto flex items-center gap-1.5">
+             <span className="hidden text-[10px] uppercase tracking-wider text-muted sm:inline">Current Context:</span>
+             <span className="font-mono text-text">
+                {Object.keys(spotData).length} Pairs, {Object.keys(futuresData).length} Contracts
+             </span>
+          </span>
        </div>
 
-       {/* Right Panel: Chat Interface */}
-       <div className="lg:col-span-9 h-full min-h-[500px]">
-          <Card className="h-full flex flex-col" noPadding>
-              {/* Header */}
-              <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-surface-secondary/20">
-                  <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center text-brand shadow-[0_0_15px_rgba(247,166,0,0.2)]">
-                          <Sparkles size={18} />
-                      </div>
-                      <div>
-                          <h2 className="font-display font-bold text-text">Fidelio.ai Analyst</h2>
-                          <div className="text-[10px] text-secondary uppercase tracking-wider">Gemini 2.5 Flash • Search Grounding Enabled</div>
-                      </div>
-                  </div>
-                  <button 
-                    onClick={() => setMessages([])} 
-                    className="p-2 hover:bg-surface-secondary rounded-full text-secondary hover:text-text transition-colors"
-                    title="Reset Session"
-                  >
-                      <RotateCcw size={16} />
-                  </button>
-              </div>
+       {/* Messages: flat log rows. The scroller is out of flow so a long log never stretches the page. */}
+       <div className="relative min-h-[180px] flex-1">
+       <div className="absolute inset-0 overflow-y-auto" ref={scrollRef}>
+          {messages.map((msg) => (
+             <div key={msg.id} className={`${ROW_GRID} ${msg.role === 'user' ? 'bg-surface-secondary' : 'bg-surface'}`}>
+                <div className="min-w-0 pt-px">
+                   <div className={`${ROLE_LABEL} ${msg.role === 'model' ? 'text-primary' : 'text-muted'}`}>
+                      {msg.role === 'model' ? 'Fidelio' : 'You'}
+                   </div>
+                   <div className="font-mono text-[10px] text-muted">
+                      {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                   </div>
+                </div>
 
-              {/* Messages Area */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-surface" ref={scrollRef}>
-                  {messages.map((msg) => (
-                      <div key={msg.id} className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''} animate-in fade-in slide-in-from-bottom-2`}>
-                          {/* Avatar */}
-                          <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 border ${
-                              msg.role === 'model' 
-                                ? 'bg-surface-secondary border-brand/20 text-brand' 
-                                : 'bg-primary/10 border-primary/20 text-primary'
-                          }`}>
-                              {msg.role === 'model' ? <Bot size={16} /> : <User size={16} />}
-                          </div>
+                <div className="min-w-0">
+                   <div className="max-w-[110ch] whitespace-pre-wrap break-words text-xs leading-relaxed text-text">
+                      {msg.text}
+                   </div>
 
-                          {/* Bubble */}
-                          <div className={`flex flex-col max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                              <div className={`px-5 py-3.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
-                                  msg.role === 'user' 
-                                    ? 'bg-primary text-black font-medium rounded-tr-sm' 
-                                    : 'bg-surface-secondary text-text border border-border rounded-tl-sm'
-                              }`}>
-                                  {msg.text}
-                              </div>
-                              
-                              {/* Sources / Grounding */}
-                              {msg.sources && msg.sources.length > 0 && (
-                                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
-                                      {msg.sources.map((src, idx) => (
-                                          <a 
-                                            key={idx} 
-                                            href={src.uri} 
-                                            target="_blank" 
-                                            rel="noopener noreferrer"
-                                            className="flex items-center gap-2 text-[10px] bg-surface-highlight hover:bg-surface-secondary border border-border rounded-lg px-3 py-2 text-secondary hover:text-primary transition-colors truncate"
-                                          >
-                                              <Globe size={10} className="shrink-0" />
-                                              <span className="truncate">{src.title}</span>
-                                          </a>
-                                      ))}
-                                  </div>
-                              )}
-                              
-                              <span className="text-[10px] text-secondary mt-1 opacity-50 px-1">
-                                  {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                              </span>
-                          </div>
+                   {/* Sources / Grounding */}
+                   {msg.sources && msg.sources.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                         {msg.sources.map((src, idx) => (
+                            <a
+                              key={idx}
+                              href={src.uri}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex h-6 max-w-[260px] items-center gap-1 rounded-sm border border-border px-1.5 text-[10px] text-secondary transition-colors hover:bg-surface-highlight hover:text-primary"
+                            >
+                               <Globe size={10} className="shrink-0" />
+                               <span className="truncate">{src.title}</span>
+                            </a>
+                         ))}
                       </div>
-                  ))}
+                   )}
+                </div>
+             </div>
+          ))}
 
-                  {isTyping && (
-                      <div className="flex gap-4 animate-pulse">
-                          <div className="w-8 h-8 rounded-full bg-surface-secondary border border-brand/20 flex items-center justify-center text-brand">
-                              <Bot size={16} />
-                          </div>
-                          <div className="bg-surface-secondary px-4 py-3 rounded-2xl rounded-tl-sm flex gap-1 items-center border border-border">
-                              <div className="w-1.5 h-1.5 bg-secondary/50 rounded-full animate-bounce"></div>
-                              <div className="w-1.5 h-1.5 bg-secondary/50 rounded-full animate-bounce delay-75"></div>
-                              <div className="w-1.5 h-1.5 bg-secondary/50 rounded-full animate-bounce delay-150"></div>
-                          </div>
-                      </div>
-                  )}
-              </div>
-
-              {/* Input Area */}
-              <div className="p-4 bg-surface border-t border-border">
-                  <div className="relative flex items-center">
-                      <input 
-                        type="text" 
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                        placeholder="Ask Fidelio about markets, news, or technicals..."
-                        className="w-full bg-surface-secondary hover:bg-surface-highlight focus:bg-surface-highlight border border-border focus:border-brand/50 rounded-xl pl-4 pr-12 py-3.5 text-sm text-text outline-none transition-all shadow-inner"
-                        disabled={isTyping}
-                      />
-                      <button 
-                        onClick={() => handleSend()}
-                        disabled={!input.trim() || isTyping}
-                        className="absolute right-2 p-2 bg-brand hover:bg-brand/90 text-white rounded-lg disabled:opacity-50 disabled:bg-secondary/20 transition-all shadow-lg shadow-brand/20 active:scale-95"
-                      >
-                          <Send size={16} />
-                      </button>
-                  </div>
-                  <div className="text-center mt-2">
-                       <p className="text-[10px] text-secondary/40">AI can make mistakes. Verify important information.</p>
-                  </div>
-              </div>
-          </Card>
+          {isTyping && (
+             <div className={`${ROW_GRID} bg-surface`} role="status">
+                <div className={`${ROLE_LABEL} pt-px text-primary`}>Fidelio</div>
+                <div className="flex h-5 items-center">
+                   <Loader2 size={12} className="animate-spin text-secondary" />
+                </div>
+             </div>
+          )}
        </div>
-    </div>
+       </div>
+
+       {/* Quick Protocols: suggestion chips */}
+       <div className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-t border-border px-3 scrollbar-hide">
+          <span className="mr-1 hidden shrink-0 text-[10px] uppercase tracking-wider text-muted md:inline">Quick Protocols</span>
+          {QUICK_PROMPTS.map((prompt, idx) => (
+             <button
+                key={idx}
+                type="button"
+                onClick={() => handleSend(prompt)}
+                className="h-6 shrink-0 whitespace-nowrap rounded-sm border border-border px-2 text-[11px] text-secondary transition-colors hover:bg-surface-secondary hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
+             >
+                {prompt}
+             </button>
+          ))}
+       </div>
+
+       {/* Input Area */}
+       <div className="flex h-9 shrink-0 items-center gap-1 border-t border-border pl-3 pr-1">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+            placeholder="Ask Fidelio about markets, news, or technicals..."
+            className="h-7 min-w-0 flex-1 rounded-sm border border-border bg-surface-secondary px-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary disabled:opacity-60"
+            disabled={isTyping}
+          />
+          <button
+            type="button"
+            onClick={() => handleSend()}
+            disabled={!input.trim() || isTyping}
+            aria-label="Send"
+            className="grid h-7 w-9 shrink-0 place-items-center rounded-sm bg-primary text-primary-contrast transition-colors hover:opacity-90 disabled:opacity-50 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
+          >
+             <Send size={14} />
+          </button>
+       </div>
+       <p className="shrink-0 truncate px-3 pb-1 text-[10px] text-muted">AI can make mistakes. Verify important information.</p>
+    </section>
   );
 };

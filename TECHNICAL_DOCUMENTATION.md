@@ -9,14 +9,15 @@
 ## 🏗️ Architecture Overview
 
 ### Technology Stack
-- **Frontend Framework**: React 18 with TypeScript
-- **Build Tool**: Vite
-- **State Management**: React Context API (4 specialized contexts)
-- **Styling**: Vanilla CSS with Glassmorphism design
+- **Frontend Framework**: React 19 with TypeScript
+- **Build Tool**: Vite (görünümler `React.lazy` ile ayrı chunk'lara bölünür)
+- **State Management**: React Context API (User, Market, Signal, Portfolio)
+- **Styling**: Tailwind CSS Play CDN (sürüm sabit: `cdn.tailwindcss.com/3.4.17`, tema ayarı `index.html` içinde) + `index.css` (CSS değişkenleri, glassmorphism)
 - **Animations**: Framer Motion
 - **Charts**: Lightweight Charts (TradingView library)
-- **WebSocket**: Native WebSocket + Socket.io
+- **WebSocket**: Native WebSocket (Binance) + socket.io (kendi backend'imiz, canlı sinyaller)
 - **Data Source**: Binance WebSocket API (Spot, Futures, Liquidations)
+- **Backend** (`server/`): Express 5 + socket.io + MySQL (`mysql2`), JWT kimlik doğrulama (`jsonwebtoken`, `bcryptjs`)
 
 ### Project Structure
 ```
@@ -29,7 +30,6 @@ FidelioAI/
 │   ├── FundingRates.tsx # Derivatives overview
 │   ├── Portfolio.tsx    # Portfolio tracker
 │   ├── SignalManager.tsx# Signal management
-│   ├── MultiChartGrid.tsx# Multi-chart view
 │   ├── FidelioAI.tsx    # AI analysis component
 │   └── WebhookManager.tsx# Webhook integration
 ├── context/             # State management contexts
@@ -46,9 +46,10 @@ FidelioAI/
 │   ├── patternRecognition.ts # Technical pattern detection
 │   ├── notifications.ts # Notification & audio system
 │   └── formatters.ts    # Data formatting utilities
+├── server/              # Express + socket.io + MySQL backend (index.cjs, db.cjs, schema.sql, migrate*.cjs)
 ├── types.ts             # TypeScript type definitions
 ├── constants.ts         # Application constants
-└── App.tsx             # Main application component
+└── App.tsx             # Main application component (auth gate, role-based navigation, lazy views)
 ```
 
 ---
@@ -375,9 +376,18 @@ interface UserContextType {
 - **Minimal**: Reduced effects, simpler design, better performance
 
 **Persistence**:
-- All preferences saved to localStorage
-- Auto-restore on app load
-- Keys: `fidelio_theme`, `fidelio_watchlist`, `fidelio_visual_mode`, etc.
+- Cihaz tercihleri (global): `fidelio_theme`, `fidelio_visual_mode`, `fidelio_language`, ses ayarı, funding geçmişi önbelleği
+- Kullanıcıya özel veriler kullanıcı id'si ile kapsamlanır (`utils/userStorage.ts`, anahtar biçimi `<anahtar>:<userId>`):
+  `fidelio_watchlist`, `fidelio_trades`, `fidelio_trades_cache`, `fidelio_notification_settings`, `fidelio_rules`, `fidelio_signal_settings`
+- Çıkış (logout) yalnızca oturum anahtarlarını (`fidelio_token`, `fidelio_user`) siler; kapsamlı veriler o kullanıcı için kalır
+
+**Kimlik doğrulama (güncel)**:
+- Giriş: `POST /api/auth/login {username, password}` → `{token, user}`. Token `fidelio_token`, kullanıcı `fidelio_user` anahtarında tutulur.
+- Açılışta saklı token `GET /api/auth/me` ile doğrulanır; rol ve profil her zaman sunucudan gelir (önbellekteki kopyaya güvenilmez).
+- Tüm backend istekleri `utils/config.ts` üzerinden yapılır (`apiRequest` / `apiJson`, `Authorization: Bearer <token>`); 401 oturumu temizleyip giriş ekranına döner, 403 çağırana iletilir.
+- Market/Signal/Portfolio provider'ları yalnızca giriş yapılmışken kurulur (`App.tsx` → `AuthGate`); giriş ekranında WebSocket veya tarayıcı tarafı tarama çalışmaz, çıkışta hepsi kapanır.
+- Kayıt (`POST /api/auth/register`) varsayılan olarak kapalıdır (403); yalnızca `ALLOW_REGISTRATION=true` iken açılır ve rol her zaman `trader` olur. Arayüzde kayıt ekranı yoktur.
+- Yalnızca admin görünümleri: `user-management`, `database`, `lab`, `webhook`. Admin olmayanlarda menüde gösterilmez ve render edilmez; sunucu da aynı kuralı uygular.
 
 ---
 
@@ -452,6 +462,8 @@ interface PortfolioSummary {
 
 ### 8. Multi-Chart Command Center
 
+> **Not:** `MultiChartGrid.tsx` şu an kodda mevcut değil; bu bölüm planlanan/eski bir özelliği anlatır.
+
 #### MultiChartGrid.tsx
 **Purpose**: Display multiple charts simultaneously
 
@@ -469,37 +481,37 @@ interface PortfolioSummary {
 
 ### 9. Webhook Integration
 
-#### WebhookManager.tsx
-**Purpose**: Receive signals from TradingView and external sources
+#### WebhookManager.tsx (yalnızca admin, menüde "Webhook")
+**Purpose**: TradingView sinyallerini almak ve admin olarak manuel sinyal göndermek
 
-**Features**:
-1. **Webhook Endpoint**:
-   - Backend server receives POST requests
-   - Validates webhook secret
-   - Parses TradingView alert format
+**Uç noktalar (güncel)**:
+1. **`POST /api/webhook`** (TradingView):
+   - Gövde: `{ "secret", "symbol", "side", "price", "strategy"?, "note"? }`
+   - Sunucuda `WEBHOOK_SECRET` tanımlı değilse **503**, secret yanlış/eksikse **401** (sabit zamanlı karşılaştırma). Secret loglanmaz ve saklanmaz.
+   - Doğrulama: `symbol` boş olmayan metin, `side` ∈ BUY/SELL/LONG/SHORT (büyük/küçük harf duyarsız), `price` sonlu ve > 0.
+   - `id` (crypto.randomUUID) ve `time` sunucuda üretilir. Aynı strategy+symbol+side 60 sn içinde tekrar gelirse `200 {duplicate: true}`.
+   - Önce DB'ye yazılır; yalnızca başarılı olursa socket ile `new_signal` yayınlanır ve `201 {signal}` döner. DB hatasında 500, yayın yok.
+   - IP başına dakikada 100 istek sınırı.
+2. **`POST /api/signals`** (JWT, admin): uygulamadan manuel sinyal. Gövde `{symbol, side, price, strategy?, note?, source?, confidence?}`; aynı doğrulama ve yayın. WebhookManager bu ucu kendisi çağırır ve listeyi socket yankısıyla günceller.
+3. **`GET /api/signals?limit=N`**: herkese açık okuma (en fazla 500, en yeniler önce).
+4. **`DELETE /api/signals/:id`** ve **`DELETE /api/signals`** (JWT, admin): `signal_deleted {id}` / `signals_cleared` yayınlar.
 
-2. **Manual Signal Creation**:
-   - UI for creating test signals
-   - Strategy selection
-   - Symbol, side, price input
-   - Confidence level
+**Tarayıcı tarafı algoritmalar** (RMI/momentum, hacim sıçraması, pattern, big-move, anomali) yalnızca yerel sinyal üretir; sunucuya asla POST etmez.
 
-3. **Signal Format**:
+**Webhook secret (arayüz)**: Admin secret'ı WebhookManager'da kendisi girer (`type=password`); yalnızca bu tarayıcıda `fidelio_webhook_secret` anahtarında tutulur ve sadece TradingView şablonu oluşturmak / test çağrısı yapmak için kullanılır. Secret hiçbir zaman `VITE_*` değişkeni olarak bundle'a gömülmez.
+
+**TradingView alarm mesajı örneği**:
 ```json
 {
+    "secret": "<WEBHOOK_SECRET>",
     "strategy": "RSI_DIVERGENCE",
-    "symbol": "BTCUSDT",
+    "symbol": "{{ticker}}",
     "side": "BUY",
-    "price": 45000,
-    "note": "Bullish divergence on 4H",
-    "confidence": 85
+    "price": {{close}},
+    "note": "Bullish divergence on 4H"
 }
 ```
-
-4. **TradingView Integration**:
-   - Alert message format: JSON
-   - Webhook URL: `http://your-server/api/webhook`
-   - Secret authentication
+Webhook URL: `https://<sunucu-adresi>/api/webhook`
 
 ---
 
@@ -747,53 +759,43 @@ BINANCE_FUTURES_API = 'https://fapi.binance.com/fapi/v1'
 
 ### Installation
 ```bash
-# Clone repository
-git clone <repository-url>
-cd FidelioAI
-
-# Install dependencies
 npm install
 
-# Set environment variables
-echo "GEMINI_API_KEY=your_api_key_here" > .env.local
+# Backend ortam değişkenleri: proje kökündeki .env (server/index.cjs bunu okur, aşağıya bakın)
 
-# Run development server
-npm run dev
+# Geliştirme: frontend (Vite, :3000) ve backend (Express, :3001) ayrı süreçler
+npm run dev        # frontend
+npm start          # backend (node server/index.cjs)
 
-# Build for production
-npm run build
-
-# Preview production build
-npm run preview
+# Tip kontrolü ve production build
+npm run typecheck
+npm run build      # çıktı: dist/
 ```
+
+**Deploy (tek origin)**: `dist/` mevcutsa backend onu statik olarak sunar ve SPA fallback uygular; frontend'i ayrı bir origin'de barındırıyorsanız `VITE_API_URL` ile backend adresini verin ve backend'de `ALLOWED_ORIGINS` ayarlayın.
 
 ### Dependencies
-```json
-{
-  "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "framer-motion": "^10.x",
-    "lightweight-charts": "^4.x",
-    "socket.io-client": "^4.x",
-    "lucide-react": "^0.x"
-  },
-  "devDependencies": {
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "@vitejs/plugin-react": "^4.0.0",
-    "typescript": "^5.0.0",
-    "vite": "^4.4.0"
-  }
-}
-```
+Güncel sürümler için `package.json`'a bakın (React 19, Vite 6, lightweight-charts 5, Express 5, socket.io 4, mysql2).
 
 ### Environment Variables
+**Backend (`.env`, yalnızca sunucuda; asla commit etmeyin):**
 ```env
-GEMINI_API_KEY=your_gemini_api_key
-VITE_WEBHOOK_SECRET=your_webhook_secret
-VITE_BACKEND_URL=http://localhost:3000
+PORT=3001
+DB_HOST=...
+DB_USER=...
+DB_PASSWORD=...
+DB_NAME=...
+JWT_SECRET=<uzun rastgele değer>        # yoksa her süreçte rastgele üretilir (yeniden başlatınca oturumlar düşer) ve uyarı loglanır
+WEBHOOK_SECRET=<uzun rastgele değer>    # yoksa /api/webhook 503 döner
+GEMINI_API_KEY=...                      # yalnızca /api/analyze için, sunucuda
+ALLOWED_ORIGINS=https://alanadiniz.com  # virgülle ayrılmış liste; boşsa tüm origin'lere izin verilir ve uyarı loglanır
+ALLOW_REGISTRATION=false                # 'true' değilse /api/auth/register 403
 ```
+**Frontend (build sırasında, gizli olmayan):**
+```env
+VITE_API_URL=https://api.alanadiniz.com # boşsa aynı origin kullanılır
+```
+`VITE_` önekli her değer herkese açık JS bundle'ına girer; gizli anahtar (Gemini, webhook secret, JWT) asla frontend'e verilmez. `vite.config.ts` içinde `define` ile anahtar enjeksiyonu yoktur.
 
 ---
 
@@ -1037,6 +1039,8 @@ function calculateFundingVelocity(history, timeWindowHours = 1) {
    - Most traded symbol
 
 ### MultiChartGrid Component
+> **Not:** Bu bileşen şu an kodda mevcut değil.
+
 **Purpose**: Professional multi-chart view
 
 **Layout**: 2x2 grid (4 charts)
@@ -1055,16 +1059,16 @@ function calculateFundingVelocity(history, timeWindowHours = 1) {
 - Responsive resizing
 
 ### WebhookManager Component
-**Purpose**: Webhook testing and manual signals
+**Purpose**: Webhook testing and manual signals (yalnızca admin)
 
 **Sections**:
 1. **Webhook Info**:
    - Your webhook URL
-   - Secret key (masked)
+   - Secret: admin tarafından girilir (`type=password`), yalnızca bu tarayıcıda `fidelio_webhook_secret` anahtarında saklanır
    - Copy to clipboard button
    - TradingView setup instructions
 
-2. **Manual Signal Creator**:
+2. **Manual Signal Creator** (`POST /api/signals`, admin JWT; liste socket `new_signal` yankısıyla güncellenir):
    - Strategy dropdown
    - Symbol input
    - Side selector (BUY/SELL/LONG/SHORT)
@@ -1088,10 +1092,11 @@ function calculateFundingVelocity(history, timeWindowHours = 1) {
 ## 🔐 Security & Best Practices
 
 ### API Key Management
-- Store API keys in `.env.local` (never commit)
-- Use environment variables in code
+- Gizli anahtarlar (`GEMINI_API_KEY`, `JWT_SECRET`, `WEBHOOK_SECRET`, DB bilgileri) yalnızca sunucudaki `.env` içinde durur (never commit)
+- Frontend'e yalnızca gizli olmayan `VITE_*` değerleri gider; AI çağrıları `/api/analyze` üzerinden sunucuda yapılır
+- Telegram bildirimleri `POST /api/notify/telegram` (JWT) üzerinden gönderilir; sunucu yalnızca `api.telegram.org` adresini çağırır ve token'ı loglamaz (`/api/forward` kaldırıldı)
 - Rotate keys regularly
-- Limit API key permissions (read-only for market data)
+- API hataları `{ "error": "<Türkçe mesaj>" }` biçimindedir; `error.message`/stack istemciye sızdırılmaz
 
 ### WebSocket Security
 - Use WSS (secure WebSocket) in production

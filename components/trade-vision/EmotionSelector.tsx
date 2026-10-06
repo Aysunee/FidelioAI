@@ -2,7 +2,7 @@ import React from 'react';
 import { Brain, Smile, Frown, Zap, Shield, Target } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { DEFAULT_EMOTIONS } from './constants';
-import { motion } from 'framer-motion';
+import { fieldLabel } from './styles';
 
 interface EmotionSelectorProps {
     selectedEmotion?: string;
@@ -20,34 +20,33 @@ const emotionIcons: Record<string, any> = {
 
 export const EmotionSelector: React.FC<EmotionSelectorProps> = ({ selectedEmotion, onChange, className }) => {
     return (
-        <div className={cn("space-y-4", className)}>
-            <div className="flex items-center gap-2">
-                <Brain size={14} className="text-orange-400 opacity-50" />
-                <span className="text-[9px] font-black text-gray-600 uppercase tracking-[0.2em]">Psychological State</span>
+        <div className={cn("space-y-1.5", className)}>
+            <div className={cn(fieldLabel, 'flex items-center gap-1.5')}>
+                <Brain size={12} />
+                <span>Psychological State</span>
             </div>
 
-            <div className="grid grid-cols-5 gap-2">
+            <div className="flex flex-wrap gap-1">
                 {DEFAULT_EMOTIONS.map(emotion => {
                     const Icon = emotionIcons[emotion.id] || Brain;
                     const isActive = selectedEmotion === emotion.id;
 
                     return (
-                        <motion.button
+                        <button
+                            type="button"
+                            aria-pressed={isActive}
                             key={emotion.id}
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
                             onClick={() => onChange(isActive ? '' : emotion.id)}
                             className={cn(
-                                "flex flex-col items-center gap-2 p-3 rounded-2xl border transition-all duration-300",
+                                'inline-flex h-6 items-center gap-1.5 rounded-sm border px-2 text-[10px] font-semibold uppercase transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary',
                                 isActive
-                                    ? `bg-orange-500/20 border-orange-500/40 text-orange-400 shadow-[0_0_15px_rgba(249,115,22,0.15)]`
-                                    : "text-gray-600 hover:border-orange-500/20 hover:text-orange-400"
+                                    ? 'border-primary bg-primary-soft text-primary'
+                                    : 'border-border bg-surface-secondary text-secondary hover:text-text'
                             )}
-                            style={!isActive ? { backgroundColor: 'var(--bg-matrix-slot)', borderColor: 'var(--border-matrix-slot)' } : {}}
                         >
-                            <Icon size={16} className={cn(isActive ? "opacity-100" : "opacity-40")} />
-                            <span className="text-[8px] font-black uppercase tracking-widest">{emotion.label}</span>
-                        </motion.button>
+                            <Icon size={12} />
+                            <span>{emotion.label}</span>
+                        </button>
                     );
                 })}
             </div>

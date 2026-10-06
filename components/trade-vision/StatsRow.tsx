@@ -1,121 +1,95 @@
 import React from 'react';
-import { TrendingUp, TrendingDown, Target, Zap, Activity, Scale, Trophy, AlertTriangle } from 'lucide-react';
-import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { Trade } from './types';
 import { cn } from '@/utils/cn';
+import { formatSignedUsd, formatUsd, getClosedTrades, getSignedPnl } from './tradeMath';
+import { fieldLabel } from './styles';
 
 interface StatsRowProps {
   trades: Trade[];
 }
 
-const StatsCard = ({ title, value, subtext, icon: Icon, color, trend }: any) => (
-  <div className="bg-white/[0.02] backdrop-blur-md p-5 rounded-2xl border border-white/5 hover:border-white/10 transition-all group relative overflow-hidden flex flex-col justify-between h-full">
-    <div className="flex justify-between items-start mb-3">
-      <div className={cn(
-        "p-2 rounded-lg transition-colors",
-        color === 'cyan' ? "bg-cyan-500/10 text-cyan-400 group-hover:text-cyan-300" :
-          color === 'emerald' ? "bg-emerald-500/10 text-emerald-400 group-hover:text-emerald-300" :
-            color === 'teal' ? "bg-teal-500/10 text-teal-400 group-hover:text-teal-300" :
-              color === 'rose' ? "bg-rose-500/10 text-rose-400 group-hover:text-rose-300" :
-                "bg-purple-500/10 text-purple-400 group-hover:text-purple-300"
-      )}>
-        <Icon size={16} />
-      </div>
-      {trend && (
-        <div className={cn(
-          "flex items-center gap-1 text-[10px] font-black tracking-widest uppercase px-2 py-0.5 rounded-md",
-          trend > 0 ? 'text-emerald-400 bg-emerald-500/5 border border-emerald-500/10' : 'text-rose-400 bg-rose-500/5 border border-rose-500/10'
-        )}>
-          {trend > 0 ? '+' : ''}{trend}%
-        </div>
-      )}
+interface KpiCellProps {
+  title: string;
+  value: React.ReactNode;
+  subtext?: string;
+  valueClassName?: string;
+  className?: string;
+  children?: React.ReactNode;
+}
+
+// One cell of the KPI strip: label, mono value, optional detail line.
+const KpiCell: React.FC<KpiCellProps> = ({ title, value, subtext, valueClassName, className, children }) => (
+  <div className={cn('flex min-w-0 flex-col justify-center gap-0.5 bg-surface px-3 py-2', className)}>
+    <span className={cn(fieldLabel, 'truncate')}>{title}</span>
+    <div className="flex min-w-0 items-center gap-2">
+      <span className={cn('truncate font-mono text-base font-semibold leading-5 text-text', valueClassName)}>{value}</span>
+      {children}
     </div>
-    <div>
-      <span className="text-gray-500 text-[9px] font-black uppercase tracking-[0.2em] block mb-1">{title}</span>
-      <div className="text-2xl font-bold text-white tracking-tighter">{value}</div>
-      {subtext && <div className="text-[10px] text-gray-500 mt-1 font-medium italic opacity-70">{subtext}</div>}
-    </div>
+    {subtext && <span className="truncate text-[10px] text-muted" title={subtext}>{subtext}</span>}
   </div>
 );
 
 const StatsRow: React.FC<StatsRowProps> = ({ trades }) => {
-  const totalReturn = trades.reduce((acc, t) => acc + (t.status === 'WIN' ? t.returnVal : -t.returnVal), 0);
-  const wins = trades.filter(t => t.status === 'WIN');
-  const losses = trades.filter(t => t.status === 'LOSS');
+  // OPEN trades have no realised P&L: they are excluded from every statistic below.
+  const closed = getClosedTrades(trades);
+  const openCount = trades.length - closed.length;
+  const totalReturn = closed.reduce((acc, t) => acc + getSignedPnl(t), 0);
+  const wins = closed.filter(t => t.status === 'WIN');
+  const losses = closed.filter(t => t.status === 'LOSS');
   const winCount = wins.length;
 
-  const winRatio = trades.length > 0 ? Math.round((winCount / trades.length) * 100) : 0;
+  const winRatio = closed.length > 0 ? Math.round((winCount / closed.length) * 100) : 0;
 
-  const avgWin = wins.length > 0 ? wins.reduce((acc, t) => acc + t.returnVal, 0) / wins.length : 0;
-  const avgLoss = losses.length > 0 ? losses.reduce((acc, t) => acc + t.returnVal, 0) / losses.length : 0;
+  const grossProfit = wins.reduce((acc, t) => acc + Math.max(0, getSignedPnl(t)), 0);
+  const grossLoss = losses.reduce((acc, t) => acc + Math.abs(Math.min(0, getSignedPnl(t))), 0);
 
-  const grossProfit = wins.reduce((acc, t) => acc + t.returnVal, 0);
-  const grossLoss = losses.reduce((acc, t) => acc + t.returnVal, 0);
+  const avgWin = wins.length > 0 ? grossProfit / wins.length : 0;
+  const avgLoss = losses.length > 0 ? grossLoss / losses.length : 0;
 
-  const profitFactor = grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : (grossProfit > 0 ? '∞' : '0.00');
+  const profitFactor = grossLoss > 0
+    ? (grossProfit / grossLoss).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : (grossProfit > 0 ? '∞' : '0,00');
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
-      <StatsCard
-        title="Net P&L"
-        value={`$${totalReturn.toLocaleString()}`}
-        subtext="Aggregated performance"
-        icon={Zap}
-        color="cyan"
-        trend={12}
+    <div className="grid shrink-0 grid-cols-2 gap-px bg-border lg:grid-cols-5">
+      <KpiCell
+        className="col-span-2 lg:col-span-1"
+        title="Net K/Z"
+        value={formatSignedUsd(totalReturn)}
+        valueClassName={totalReturn > 0 ? 'text-success' : totalReturn < 0 ? 'text-danger' : undefined}
+        subtext={`${closed.length} kapalı işlem${openCount > 0 ? ` · ${openCount} açık işlem hariç` : ''}`}
       />
 
-      <div className="bg-white/[0.02] backdrop-blur-md p-5 rounded-2xl border border-white/5 flex items-center justify-between group relative overflow-hidden h-full">
-        <div className="z-10">
-          <span className="text-gray-500 text-[9px] font-black uppercase tracking-[0.2em] block mb-1">Win Rate</span>
-          <div className="text-2xl font-bold text-white tracking-tighter">{winRatio}%</div>
-          <div className="text-[10px] text-gray-500 mt-1 flex items-center gap-2">
-            <Activity size={12} className="text-purple-500" /> {trades.length} Samples
-          </div>
+      <KpiCell
+        title="Kazanma Oranı"
+        value={`%${winRatio}`}
+        subtext={`${closed.length} kapalı işlem`}
+      >
+        <div
+          className="h-1 min-w-0 flex-1 bg-surface-highlight"
+          role="img"
+          aria-label={`Kazanma oranı %${winRatio}`}
+        >
+          <div className="h-full bg-primary" style={{ width: `${winRatio}%` }} />
         </div>
-        <div className="h-14 w-14 opacity-90 group-hover:scale-110 transition-transform">
-          <ResponsiveContainer width="100%" height="100%">
-            <PieChart>
-              <Pie
-                data={[{ v: winRatio }, { v: 100 - winRatio }]}
-                innerRadius={18}
-                outerRadius={24}
-                paddingAngle={4}
-                dataKey="v"
-                stroke="none"
-                startAngle={90}
-                endAngle={-270}
-              >
-                <Cell fill="#a855f7" />
-                <Cell fill="rgba(255,255,255,0.05)" />
-              </Pie>
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
+      </KpiCell>
 
-      <StatsCard
-        title="Profit Factor"
+      <KpiCell
+        title="Kâr Faktörü"
         value={profitFactor}
-        subtext={`$${Math.round(grossProfit / 1000)}k Win / $${Math.round(grossLoss / 1000)}k Loss`}
-        icon={Scale}
-        color="indigo"
+        subtext={`${formatUsd(grossProfit)} kazanç / ${formatUsd(grossLoss)} kayıp`}
       />
 
-      <StatsCard
-        title="Efficiency"
-        value={`$${Math.round(avgWin).toLocaleString()}`}
-        subtext="Average expected outcome"
-        icon={Trophy}
-        color="teal"
+      <KpiCell
+        title="Ort. Kazanç"
+        value={formatUsd(avgWin)}
+        subtext={`${wins.length} kazançlı işlem ortalaması`}
       />
 
-      <StatsCard
-        title="Risk Profile"
-        value={`$${Math.round(avgLoss).toLocaleString()}`}
-        subtext="Mean drawdown exposure"
-        icon={AlertTriangle}
-        color="rose"
+      <KpiCell
+        title="Ort. Kayıp"
+        value={formatUsd(avgLoss)}
+        subtext={`${losses.length} kayıplı işlem ortalaması`}
       />
     </div>
   );

@@ -7,7 +7,7 @@ import { useMemo } from 'react';
 import { useUser } from '../context/UserContext';
 import { colors } from './colors';
 
-export type Theme = 'dark' | 'corporate' | 'labs';
+export type Theme = 'light' | 'dark' | 'corporate' | 'labs'; // mirrors context/UserContext ('light' renders like 'dark', see isLight)
 
 // ============================================
 // THEME CLASS GENERATORS

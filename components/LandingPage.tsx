@@ -1,54 +1,21 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { LandingNav } from './LandingNav';
-import { ArrowRight, Zap, Shield, TrendingUp, Lock, X, AlertCircle, Sparkles, Target, Activity, BarChart3, Brain, Gauge } from 'lucide-react';
-import { motion, AnimatePresence, useInView } from 'framer-motion';
+import { ArrowRight, Zap, TrendingUp, Lock, X, AlertCircle, Sparkles, Target, Activity, BarChart3, Brain, Gauge } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useUser } from '../context/UserContext';
 import { translations } from '../utils/translations';
 
-interface LandingPageProps {
-    onLogin: (password: string) => boolean;
-}
-
-// Animated Counter Component
-const AnimatedCounter = ({ value, suffix = '' }: { value: number; suffix?: string }) => {
-    const ref = useRef(null);
-    const isInView = useInView(ref, { once: true });
-    const [count, setCount] = useState(0);
-
-    useEffect(() => {
-        if (isInView) {
-            let start = 0;
-            const duration = 2000;
-            const increment = value / (duration / 16);
-
-            const timer = setInterval(() => {
-                start += increment;
-                if (start >= value) {
-                    setCount(value);
-                    clearInterval(timer);
-                } else {
-                    setCount(Math.floor(start));
-                }
-            }, 16);
-
-            return () => clearInterval(timer);
-        }
-    }, [isInView, value]);
-
-    return (
-        <span ref={ref}>
-            {count.toLocaleString()}{suffix}
-        </span>
-    );
-};
-
-export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
-    const { language } = useUser();
+// NOTE: This page is currently not rendered by App.tsx (unauthenticated users go straight to <Login />).
+// It uses the same username/password login as <Login /> so it can be wired in safely later.
+export const LandingPage: React.FC = () => {
+    const { language, login } = useUser();
     const t = translations[language];
 
     const [showLoginModal, setShowLoginModal] = useState(false);
+    const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
-    const [error, setError] = useState(false);
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
     const [shake, setShake] = useState(0);
 
     // Keyboard navigation for modal
@@ -59,29 +26,42 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
             }
         };
 
+        if (typeof document === 'undefined') return;
         document.addEventListener('keydown', handleEscape);
         return () => document.removeEventListener('keydown', handleEscape);
     }, [showLoginModal]);
 
-    // Focus trap for accessibility
+    // Lock page scroll while the modal is open
     useEffect(() => {
-        if (showLoginModal) {
-            document.body.style.overflow = 'hidden';
-        } else {
-            document.body.style.overflow = 'unset';
-        }
+        if (typeof document === 'undefined') return;
+        document.body.style.overflow = showLoginModal ? 'hidden' : 'unset';
+        return () => { document.body.style.overflow = 'unset'; };
     }, [showLoginModal]);
 
     const handleLogin = () => {
         setShowLoginModal(true);
     };
 
-    const handleSubmit = (e: React.FormEvent) => {
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        const success = onLogin(password);
-        if (!success) {
-            setError(true);
+        if (loading) return;
+        setError('');
+        if (!username.trim() || !password) {
+            setError('Kullanıcı adı ve şifre gereklidir.');
             setShake(prev => prev + 1);
+            return;
+        }
+        setLoading(true);
+        try {
+            const result = await login(username.trim(), password);
+            if (!result.success) {
+                setError(result.error || 'Kullanıcı adı veya şifre hatalı.');
+                setShake(prev => prev + 1);
+            }
+        } catch {
+            setError('Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.');
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -122,13 +102,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
             description: t.featSignalDesc,
             gradient: "from-indigo-500 to-violet-600"
         }
-    ];
-
-    const stats = [
-        { label: t.marketsTracked, value: 500, suffix: "+" },
-        { label: t.signalsPerDay, value: 150, suffix: "+" },
-        { label: t.aiAccuracy, value: 94, suffix: "%" },
-        { label: t.activeTraders, value: 2500, suffix: "+" }
     ];
 
     const [showIntro, setShowIntro] = useState(true);
@@ -214,48 +187,75 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                                                     <h1 id="login-title" className="text-4xl font-bold bg-gradient-to-r from-purple-400 via-violet-400 to-amber-400 bg-clip-text text-transparent mb-3">
                                                         {t.welcomeBack}
                                                     </h1>
-                                                    <p className="text-gray-400">{t.enterAccessCode}</p>
+                                                    <p className="text-gray-400">Devam etmek için kullanıcı adınızı ve şifrenizi girin</p>
                                                 </div>
 
                                                 <form onSubmit={handleSubmit} className="space-y-6">
                                                     <div className="space-y-3">
-                                                        <label htmlFor="password-input" className="sr-only">
-                                                            {t.accessCode}
-                                                        </label>
                                                         <motion.div
                                                             animate={{ x: error ? [0, -10, 10, -10, 10, 0] : 0 }}
                                                             key={shake}
                                                             transition={{ duration: 0.4 }}
+                                                            className="space-y-3"
                                                         >
+                                                            <label htmlFor="landing-username-input" className="sr-only">
+                                                                Kullanıcı adı
+                                                            </label>
+                                                            <input
+                                                                id="landing-username-input"
+                                                                name="username"
+                                                                type="text"
+                                                                autoComplete="username"
+                                                                autoCapitalize="none"
+                                                                spellCheck={false}
+                                                                value={username}
+                                                                onChange={(e) => {
+                                                                    setUsername(e.target.value);
+                                                                    setError('');
+                                                                }}
+                                                                placeholder="Kullanıcı adı"
+                                                                aria-invalid={!!error}
+                                                                aria-describedby={error ? "password-error" : undefined}
+                                                                disabled={loading}
+                                                                className={`w-full bg-black/60 border ${error ? 'border-red-500/50 text-red-200' : 'border-white/20 text-white'
+                                                                    } rounded-2xl px-6 py-4 outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all placeholder:text-gray-600 text-center text-lg font-medium`}
+                                                                autoFocus
+                                                            />
+                                                            <label htmlFor="password-input" className="sr-only">
+                                                                Şifre
+                                                            </label>
                                                             <input
                                                                 id="password-input"
+                                                                name="password"
                                                                 type="password"
+                                                                autoComplete="current-password"
                                                                 value={password}
                                                                 onChange={(e) => {
                                                                     setPassword(e.target.value);
-                                                                    setError(false);
+                                                                    setError('');
                                                                 }}
-                                                                placeholder={t.enterAccessCode}
-                                                                aria-invalid={error}
+                                                                placeholder="Şifre"
+                                                                aria-invalid={!!error}
                                                                 aria-describedby={error ? "password-error" : undefined}
+                                                                disabled={loading}
                                                                 className={`w-full bg-black/60 border ${error ? 'border-red-500/50 text-red-200' : 'border-white/20 text-white'
                                                                     } rounded-2xl px-6 py-4 outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all placeholder:text-gray-600 text-center tracking-widest text-lg font-medium`}
-                                                                autoFocus
                                                             />
                                                         </motion.div>
                                                         {error && (
                                                             <div id="password-error" role="alert" className="flex items-center justify-center gap-2 text-red-400 text-sm">
                                                                 <AlertCircle size={14} />
-                                                                <span>{t.accessDenied}</span>
+                                                                <span>{error}</span>
                                                             </div>
                                                         )}
                                                     </div>
 
                                                     <button
                                                         type="submit"
-                                                        className="w-full bg-gradient-to-r from-purple-600 to-violet-600 text-white font-bold py-4 rounded-2xl hover:from-purple-500 hover:to-violet-500 transition-all shadow-lg shadow-purple-500/30 hover:shadow-purple-500/50 flex items-center justify-center gap-2 group focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 focus:ring-offset-black"
+                                                        disabled={loading}
+                                                        className="w-full disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-purple-600 to-violet-600 text-white font-bold py-4 rounded-2xl hover:from-purple-500 hover:to-violet-500 transition-all shadow-lg shadow-purple-500/30 hover:shadow-purple-500/50 flex items-center justify-center gap-2 group focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 focus:ring-offset-black"
                                                     >
-                                                        <span>{t.enterSystem}</span>
+                                                        <span>{loading ? 'Giriş yapılıyor…' : t.enterSystem}</span>
                                                         <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />
                                                     </button>
                                                 </form>
@@ -340,12 +340,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                                                         <TrendingUp size={24} className="text-emerald-400" />
                                                     </div>
                                                     <div>
-                                                        <div className="text-xs text-gray-400 uppercase tracking-wider">AI Signal</div>
+                                                        <div className="text-xs text-gray-400 uppercase tracking-wider">Örnek Sinyal</div>
                                                         <div className="text-lg font-bold text-white">BTC/USDT</div>
                                                     </div>
                                                 </div>
-                                                <div className="text-3xl font-bold text-emerald-400 font-mono">+18.7%</div>
-                                                <div className="text-xs text-gray-500 mt-2">Pattern: Bull Flag</div>
+                                                <div className="text-3xl font-bold text-emerald-400 font-mono">LONG</div>
+                                                <div className="text-xs text-gray-500 mt-2">Formasyon: Boğa Bayrağı (temsili)</div>
                                             </motion.div>
 
                                             <motion.div
@@ -358,43 +358,18 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                                                         <Activity size={24} className="text-purple-400" />
                                                     </div>
                                                     <div>
-                                                        <div className="text-xs text-gray-400 uppercase tracking-wider">Funding Alert</div>
+                                                        <div className="text-xs text-gray-400 uppercase tracking-wider">Örnek Funding Uyarısı</div>
                                                         <div className="text-lg font-bold text-white">ETH Perp</div>
                                                     </div>
                                                 </div>
                                                 <div className="text-3xl font-bold text-purple-400 font-mono">-0.045%</div>
-                                                <div className="text-xs text-gray-500 mt-2">Arbitrage Opportunity</div>
+                                                <div className="text-xs text-gray-500 mt-2">Temsili veri</div>
                                             </motion.div>
 
                                             {/* Center Glow */}
                                             <div className="w-96 h-96 bg-gradient-to-br from-purple-600/20 to-amber-600/20 rounded-full blur-3xl" />
                                         </div>
                                     </motion.div>
-                                </div>
-                            </div>
-                        </section>
-
-                        {/* Stats Section - Minimalist */}
-                        <section className="py-24 border-y border-white/5 bg-white/[0.02]">
-                            <div className="container mx-auto px-6 lg:px-12">
-                                <div className="grid grid-cols-2 lg:grid-cols-4 gap-12">
-                                    {stats.map((stat, idx) => (
-                                        <motion.div
-                                            key={idx}
-                                            initial={{ opacity: 0, y: 20 }}
-                                            whileInView={{ opacity: 1, y: 0 }}
-                                            viewport={{ once: true }}
-                                            transition={{ delay: idx * 0.1 }}
-                                            className="text-center"
-                                        >
-                                            <div className="text-5xl lg:text-6xl font-bold bg-gradient-to-b from-white to-gray-600 bg-clip-text text-transparent mb-3 font-mono">
-                                                <AnimatedCounter value={stat.value} suffix={stat.suffix} />
-                                            </div>
-                                            <div className="text-sm font-medium text-gray-500 uppercase tracking-wider">
-                                                {stat.label}
-                                            </div>
-                                        </motion.div>
-                                    ))}
                                 </div>
                             </div>
                         </section>
@@ -462,7 +437,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                                 >
                                     <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-purple-500/10 border border-purple-500/20 mb-8">
                                         <Sparkles size={16} className="text-purple-400" />
-                                        <span className="text-sm font-medium text-purple-300">{t.joinTraders}</span>
+                                        <span className="text-sm font-medium text-purple-300">Yetkili kullanıcılar için</span>
                                     </div>
 
                                     <h2 className="text-6xl lg:text-7xl font-bold mb-8 leading-tight">
@@ -480,7 +455,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                                         onClick={handleLogin}
                                         className="px-12 py-5 bg-gradient-to-r from-purple-600 to-violet-600 text-white rounded-2xl font-bold text-xl hover:from-purple-500 hover:to-violet-500 transition-all shadow-2xl shadow-purple-500/30 hover:shadow-purple-500/50 inline-flex items-center gap-3 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 focus:ring-offset-black"
                                     >
-                                        <span>{t.startFreeTrial}</span>
+                                        <span>{t.enterSystem}</span>
                                         <ArrowRight size={24} />
                                     </button>
                                 </motion.div>
@@ -490,7 +465,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                         {/* Footer - Minimal */}
                         <footer className="py-16 border-t border-white/5 bg-black">
                             <div className="container mx-auto px-6 lg:px-12">
-                                <div className="grid grid-cols-1 md:grid-cols-4 gap-12 mb-12">
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-12 mb-12">
                                     <div>
                                         <div className="flex items-center gap-2 mb-6">
                                             <span className="font-black text-2xl uppercase tracking-wider text-white">FIDELIO</span>
@@ -504,27 +479,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onLogin }) => {
                                         <h4 className="font-bold mb-4 text-white">{t.platform}</h4>
                                         <ul className="space-y-3 text-sm text-gray-500">
                                             <li><a href="#features" className="hover:text-white transition-colors focus:outline-none focus:text-white">{t.exploreFeatures}</a></li>
-                                            <li><a href="#" className="hover:text-white transition-colors focus:outline-none focus:text-white">Pricing</a></li>
-                                            <li><a href="#" className="hover:text-white transition-colors focus:outline-none focus:text-white">API</a></li>
-                                        </ul>
-                                    </div>
-
-                                    <div>
-                                        <h4 className="font-bold mb-4 text-white">{t.company}</h4>
-                                        <ul className="space-y-3 text-sm text-gray-500">
-                                            <li><a href="#" className="hover:text-white transition-colors focus:outline-none focus:text-white">About</a></li>
-                                            <li><a href="#" className="hover:text-white transition-colors focus:outline-none focus:text-white">Blog</a></li>
-                                            <li><a href="#" className="hover:text-white transition-colors focus:outline-none focus:text-white">Contact</a></li>
                                         </ul>
                                     </div>
 
                                     <div>
                                         <h4 className="font-bold mb-4 text-white">{t.legal}</h4>
-                                        <ul className="space-y-3 text-sm text-gray-500">
-                                            <li><a href="#" className="hover:text-white transition-colors focus:outline-none focus:text-white">Privacy</a></li>
-                                            <li><a href="#" className="hover:text-white transition-colors focus:outline-none focus:text-white">Terms</a></li>
-                                            <li><a href="#" className="hover:text-white transition-colors focus:outline-none focus:text-white">Disclaimer</a></li>
-                                        </ul>
+                                        <p className="text-sm text-gray-500 leading-relaxed">
+                                            Risk bildirimi: Fidelio bir piyasa analiz aracıdır. Sunulan veriler, sinyaller ve yapay zeka yorumları yatırım tavsiyesi değildir; kripto varlık işlemleri yüksek risk içerir ve sermaye kaybına yol açabilir.
+                                        </p>
                                     </div>
                                 </div>
 

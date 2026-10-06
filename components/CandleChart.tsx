@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useUser } from '../context/UserContext';
-import { Loader2 } from 'lucide-react';
+import { Loader2, TriangleAlert } from 'lucide-react';
+import { isLightTheme } from '../utils/themeMode';
 
 interface CandleChartProps {
     symbol: string;
@@ -13,30 +14,67 @@ declare global {
     }
 }
 
+const SCRIPT_ID = 'tradingview-widget-script';
+const SCRIPT_SRC = 'https://s3.tradingview.com/tv.js';
+// If the widget iframe never reports "load", stop showing the spinner after this long
+const LOADING_FALLBACK_MS = 10000;
+
+// The TradingView widget needs concrete colours: read them from the theme tokens (index.css)
+// so the chart always matches the panels around it.
+const readToken = (name: string, fallback: string): string => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return fallback;
+    const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+};
+
 export const CandleChart: React.FC<CandleChartProps> = ({ symbol, id }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const { theme } = useUser();
     const chartId = useRef(id || `tradingview_${symbol}_${Math.random().toString(36).substring(7)}`).current;
     const widgetRef = useRef<any>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
+
+    // Every theme except 'dark' is a light UI (see utils/themeMode).
+    const isLightUi = isLightTheme(theme);
 
     useEffect(() => {
+        if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
         let mounted = true;
+        let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+        let observedScript: HTMLScriptElement | null = null;
+
+        setIsLoading(true);
+        setLoadError(null);
+
+        const markReady = () => {
+            if (mounted) setIsLoading(false);
+        };
+
+        const showScriptError = () => {
+            if (!mounted) return;
+            setIsLoading(false);
+            setLoadError('Grafik yüklenemedi. Reklam engelleyiciyi veya internet bağlantınızı kontrol edip sayfayı yenileyin.');
+        };
+
+        // Real 'error' event: the request definitely failed, so later mounts should retry with a fresh tag
+        const handleScriptError = () => {
+            if (observedScript) observedScript.dataset.failed = 'true';
+            showScriptError();
+        };
 
         const initWidget = () => {
-            if (!containerRef.current || !window.TradingView) return;
-
-            // Cleanup previous widget
-            if (widgetRef.current) {
-                try {
-                    // Some versions of the widget might have a remove method, or we just clear the container
-                    // widgetRef.current.remove(); 
-                } catch (e) {
-                    console.error('Widget cleanup error:', e);
-                }
-            }
+            if (!mounted || !containerRef.current || !window.TradingView) return;
 
             containerRef.current.innerHTML = '';
+
+            // Concrete colours for the widget, taken from the active theme's tokens
+            const surface = readToken('--bg-surface', isLightUi ? '#FFFFFF' : '#11151A');
+            const gridLine = readToken('--color-border', isLightUi ? '#DFE3E8' : '#222832');
+            const axisText = readToken('--color-text-secondary', isLightUi ? '#5A6472' : '#8A94A6');
+            const upColor = readToken('--color-success', isLightUi ? '#0A9F68' : '#0ECB81');
+            const downColor = readToken('--color-danger', isLightUi ? '#D9304A' : '#F6465D');
 
             try {
                 widgetRef.current = new window.TradingView.widget({
@@ -46,10 +84,10 @@ export const CandleChart: React.FC<CandleChartProps> = ({ symbol, id }) => {
                     symbol: `BINANCE:${symbol}`,
                     interval: '15',
                     timezone: 'Etc/UTC',
-                    theme: theme === 'dark' ? 'dark' : 'light',
+                    theme: isLightUi ? 'light' : 'dark',
                     style: '1',
                     locale: 'en',
-                    toolbar_bg: theme === 'dark' ? '#000000' : theme === 'corporate' ? '#FAFBFC' : '#f1f3f6',
+                    toolbar_bg: surface,
                     enable_publishing: false,
                     allow_symbol_change: true,
                     hide_top_toolbar: false,
@@ -72,63 +110,103 @@ export const CandleChart: React.FC<CandleChartProps> = ({ symbol, id }) => {
                         'left_toolbar',
                     ],
                     overrides: {
-                        "paneProperties.background": theme === 'dark' ? "#000000" : theme === 'corporate' ? "#FAFBFC" : "#ffffff",
-                        "paneProperties.vertGridProperties.color": theme === 'dark' ? "#1f2937" : theme === 'corporate' ? "#E5E7EB" : "#e5e7eb",
-                        "paneProperties.horzGridProperties.color": theme === 'dark' ? "#1f2937" : theme === 'corporate' ? "#E5E7EB" : "#e5e7eb",
-                        "scalesProperties.textColor": theme === 'dark' ? "#9ca3af" : theme === 'corporate' ? "#111827" : "#374151",
-                        "mainSeriesProperties.candleStyle.upColor": theme === 'corporate' ? "#059669" : "#10B981",
-                        "mainSeriesProperties.candleStyle.downColor": theme === 'corporate' ? "#DC2626" : "#EF4444",
+                        "paneProperties.background": surface,
+                        "paneProperties.vertGridProperties.color": gridLine,
+                        "paneProperties.horzGridProperties.color": gridLine,
+                        "scalesProperties.textColor": axisText,
+                        "mainSeriesProperties.candleStyle.upColor": upColor,
+                        "mainSeriesProperties.candleStyle.downColor": downColor,
                         "mainSeriesProperties.candleStyle.drawWick": true,
                         "mainSeriesProperties.candleStyle.drawBorder": true,
-                        "mainSeriesProperties.candleStyle.borderColor": theme === 'corporate' ? "#059669" : "#10B981",
-                        "mainSeriesProperties.candleStyle.borderUpColor": theme === 'corporate' ? "#059669" : "#10B981",
-                        "mainSeriesProperties.candleStyle.borderDownColor": theme === 'corporate' ? "#DC2626" : "#EF4444",
-                        "mainSeriesProperties.candleStyle.wickUpColor": theme === 'corporate' ? "#059669" : "#10B981",
-                        "mainSeriesProperties.candleStyle.wickDownColor": theme === 'corporate' ? "#DC2626" : "#EF4444",
+                        "mainSeriesProperties.candleStyle.borderColor": upColor,
+                        "mainSeriesProperties.candleStyle.borderUpColor": upColor,
+                        "mainSeriesProperties.candleStyle.borderDownColor": downColor,
+                        "mainSeriesProperties.candleStyle.wickUpColor": upColor,
+                        "mainSeriesProperties.candleStyle.wickDownColor": downColor,
                     }
                 });
 
-                if (mounted) setIsLoading(false);
+                // The script may arrive after the timeout already showed an error (slow network): clear it
+                if (mounted) setLoadError(null);
+
+                // Hide the spinner when the widget iframe has actually loaded (with a fallback timeout)
+                const iframe = containerRef.current?.querySelector('iframe');
+                if (iframe) iframe.addEventListener('load', markReady, { once: true });
+                if (fallbackTimer) clearTimeout(fallbackTimer);
+                fallbackTimer = setTimeout(markReady, LOADING_FALLBACK_MS);
             } catch (error) {
                 console.error('TradingView widget error:', error);
+                if (mounted) {
+                    setIsLoading(false);
+                    setLoadError('Grafik başlatılamadı. Lütfen sayfayı yenileyin.');
+                }
             }
         };
 
         if (window.TradingView) {
-            initWidget();
+            // <html> receives its theme class in UserProvider's effect, which runs after this (child)
+            // effect. Starting in a microtask makes sure the tokens read above belong to the new theme.
+            queueMicrotask(initWidget);
         } else {
-            const scriptId = 'tradingview-widget-script';
-            const existingScript = document.getElementById(scriptId);
+            let script = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
 
-            if (existingScript) {
-                existingScript.addEventListener('load', initWidget);
-            } else {
-                const script = document.createElement('script');
-                script.id = scriptId;
-                script.src = 'https://s3.tradingview.com/tv.js';
-                script.async = true;
-                script.onload = initWidget;
-                document.head.appendChild(script);
+            // A previous attempt failed (adblock / network): drop it and retry
+            if (script && script.dataset.failed === 'true') {
+                script.remove();
+                script = null;
             }
+
+            if (!script) {
+                const newScript = document.createElement('script');
+                newScript.id = SCRIPT_ID;
+                newScript.src = SCRIPT_SRC;
+                newScript.async = true;
+                // Permanent flag so later mounts know this attempt failed
+                newScript.addEventListener('error', () => { newScript.dataset.failed = 'true'; });
+                document.head.appendChild(newScript);
+                script = newScript;
+            }
+
+            observedScript = script;
+            script.addEventListener('load', initWidget);
+            script.addEventListener('error', handleScriptError);
+
+            // Script never arrived (blocked request that fires no event, very slow network...).
+            // Only show the message: the script may still load, so it is NOT marked as failed here
+            // (the 'load' listener stays attached and initWidget clears the error if it does).
+            fallbackTimer = setTimeout(() => {
+                if (!window.TradingView) showScriptError();
+            }, LOADING_FALLBACK_MS * 2);
         }
 
         return () => {
             mounted = false;
-            // No explicit cleanup needed as we clear innerHTML on next init
+            if (fallbackTimer) clearTimeout(fallbackTimer);
+            if (observedScript) {
+                observedScript.removeEventListener('load', initWidget);
+                observedScript.removeEventListener('error', handleScriptError);
+            }
+            // The container is cleared on the next init
         };
-    }, [symbol, theme, chartId]);
+    }, [symbol, theme, isLightUi, chartId]);
 
     return (
-        <div className="relative w-full h-full bg-black/20">
-            {isLoading && (
-                <div className="absolute inset-0 flex items-center justify-center z-10">
-                    <Loader2 className="animate-spin text-purple-500" size={24} />
+        <div className="relative h-full w-full bg-surface">
+            {isLoading && !loadError && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center">
+                    <Loader2 className="animate-spin text-secondary" size={14} />
+                </div>
+            )}
+            {loadError && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center gap-1.5 p-4 text-center">
+                    <TriangleAlert size={14} className="shrink-0 text-danger" />
+                    <p className="text-xs text-secondary">{loadError}</p>
                 </div>
             )}
             <div
                 id={chartId}
                 ref={containerRef}
-                className="w-full h-full"
+                className="h-full w-full"
             />
         </div>
     );

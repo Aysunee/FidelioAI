@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Hexagon, Menu, X, ChevronRight, Bitcoin } from 'lucide-react';
+import { Menu, X, ChevronRight } from 'lucide-react';
 
 interface LandingNavProps {
     onLogin: () => void;
@@ -11,7 +11,13 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onLogin, logoLayoutId })
     const [scrolled, setScrolled] = useState(false);
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-    // ... rest of component
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const handleScroll = () => setScrolled(window.scrollY > 20);
+        handleScroll();
+        window.addEventListener('scroll', handleScroll, { passive: true });
+        return () => window.removeEventListener('scroll', handleScroll);
+    }, []);
 
     return (
         <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${scrolled ? 'bg-black/80 backdrop-blur-md border-b border-white/10 py-4' : 'bg-transparent py-6'
@@ -35,25 +41,16 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onLogin, logoLayoutId })
 
                 {/* Desktop Links */}
                 <div className="hidden md:flex items-center gap-8">
-                    <a href="#features" className="text-sm font-medium text-gray-300 hover:text-white transition-colors">Features</a>
-                    <a href="#markets" className="text-sm font-medium text-gray-300 hover:text-white transition-colors">Markets</a>
-                    <a href="#pricing" className="text-sm font-medium text-gray-300 hover:text-white transition-colors">Pricing</a>
-                    <a href="#about" className="text-sm font-medium text-gray-300 hover:text-white transition-colors">About</a>
+                    <a href="#features" className="text-sm font-medium text-gray-300 hover:text-white transition-colors">Özellikler</a>
                 </div>
 
                 {/* Auth Buttons */}
                 <div className="hidden md:flex items-center gap-4">
                     <button
                         onClick={onLogin}
-                        className="text-sm font-medium text-gray-300 hover:text-white transition-colors"
-                    >
-                        Log In
-                    </button>
-                    <button
-                        onClick={onLogin}
                         className="group flex items-center gap-2 px-5 py-2.5 bg-white text-black rounded-full text-sm font-bold hover:bg-gray-200 transition-all transform hover:scale-105"
                     >
-                        Open Account
+                        Giriş Yap
                         <ChevronRight size={16} className="group-hover:translate-x-1 transition-transform" />
                     </button>
                 </div>
@@ -62,6 +59,8 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onLogin, logoLayoutId })
                 <button
                     className="md:hidden p-2 text-gray-300"
                     onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                    aria-label={mobileMenuOpen ? 'Menüyü kapat' : 'Menüyü aç'}
+                    aria-expanded={mobileMenuOpen}
                 >
                     {mobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
                 </button>
@@ -70,22 +69,13 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onLogin, logoLayoutId })
             {/* Mobile Menu */}
             {mobileMenuOpen && (
                 <div className="absolute top-full left-0 right-0 bg-black/95 backdrop-blur-xl border-b border-white/10 p-6 md:hidden flex flex-col gap-4">
-                    <a href="#features" className="text-lg font-medium text-gray-300" onClick={() => setMobileMenuOpen(false)}>Features</a>
-                    <a href="#markets" className="text-lg font-medium text-gray-300" onClick={() => setMobileMenuOpen(false)}>Markets</a>
-                    <a href="#pricing" className="text-lg font-medium text-gray-300" onClick={() => setMobileMenuOpen(false)}>Pricing</a>
-                    <a href="#about" className="text-lg font-medium text-gray-300" onClick={() => setMobileMenuOpen(false)}>About</a>
+                    <a href="#features" className="text-lg font-medium text-gray-300" onClick={() => setMobileMenuOpen(false)}>Özellikler</a>
                     <div className="h-px bg-white/10 my-2"></div>
-                    <button
-                        onClick={() => { onLogin(); setMobileMenuOpen(false); }}
-                        className="text-lg font-medium text-gray-300 text-left"
-                    >
-                        Log In
-                    </button>
                     <button
                         onClick={() => { onLogin(); setMobileMenuOpen(false); }}
                         className="flex items-center justify-center gap-2 px-5 py-3 bg-white text-black rounded-full text-sm font-bold hover:bg-gray-200"
                     >
-                        Open Account
+                        Giriş Yap
                     </button>
                 </div>
             )}

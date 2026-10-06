@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Calendar, BarChart2, BookOpen, MessageSquare, Settings, LogOut } from 'lucide-react';
+import { LayoutDashboard, Calendar, BarChart2, BookOpen, Settings } from 'lucide-react';
 import { cn } from '@/utils/cn';
 
 interface SidebarProps {
@@ -7,48 +7,51 @@ interface SidebarProps {
   onViewChange: (view: 'dashboard' | 'calendar' | 'analytics' | 'journal') => void;
 }
 
+const focusRing = 'focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-primary';
+
 const Sidebar: React.FC<SidebarProps> = ({ activeView, onViewChange }) => {
   const icons = [
-    { id: 'dashboard', icon: <LayoutDashboard size={18} />, label: 'Overview' },
-    { id: 'calendar', icon: <Calendar size={18} />, label: 'History' },
-    { id: 'analytics', icon: <BarChart2 size={18} />, label: 'Analytics' },
-    { id: 'journal', icon: <BookOpen size={18} />, label: 'Journal' },
+    { id: 'dashboard', icon: <LayoutDashboard size={14} />, label: 'Overview' },
+    { id: 'calendar', icon: <Calendar size={14} />, label: 'History' },
+    { id: 'analytics', icon: <BarChart2 size={14} />, label: 'Analytics' },
+    { id: 'journal', icon: <BookOpen size={14} />, label: 'Journal' },
   ];
 
+  // Below lg: a thin horizontal tab strip. From lg: a w-44 nav panel with text rows.
   return (
-    <div className="w-16 h-full bg-white/[0.02] border-r border-white/5 flex flex-col items-center py-6 gap-8 z-20 backdrop-blur-xl">
-      <div className="flex flex-col gap-4 flex-1 w-full px-2">
+    <nav className="flex h-8 shrink-0 items-stretch bg-surface lg:h-full lg:w-44 lg:flex-col">
+      <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto scrollbar-hide lg:flex-col lg:overflow-visible">
         {icons.map((item) => (
           <button
             key={item.id}
+            type="button"
+            aria-current={activeView === item.id ? 'page' : undefined}
             onClick={() => onViewChange(item.id as any)}
             className={cn(
-              "p-3 rounded-xl transition-all duration-500 w-full flex justify-center group relative",
+              'flex min-w-0 flex-1 items-center justify-center gap-2 px-1 text-[11px] font-medium uppercase tracking-wider transition-colors sm:flex-none sm:shrink-0 sm:justify-start sm:px-3 lg:h-8 lg:w-full lg:text-xs lg:normal-case lg:tracking-normal',
+              focusRing,
               activeView === item.id
-                ? 'bg-gradient-to-br from-purple-500/20 to-indigo-500/20 text-purple-400 border border-purple-500/20 shadow-lg shadow-purple-500/5'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
+                ? 'bg-surface-highlight text-text shadow-[inset_0_-2px_0_var(--color-brand)] lg:shadow-[inset_2px_0_0_var(--color-brand)]'
+                : 'text-secondary hover:bg-surface-secondary hover:text-text'
             )}
           >
-            {item.icon}
-
-            {/* Tooltip */}
-            <div className="absolute left-full ml-4 top-1/2 -translate-y-1/2 bg-gray-950/90 text-white text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-300 whitespace-nowrap border border-white/5 z-50 shadow-2xl backdrop-blur-xl translate-x-[-10px] group-hover:translate-x-0">
-              {item.label}
-            </div>
-
-            {activeView === item.id && (
-              <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-6 bg-purple-500 rounded-r-full shadow-[0_0_15px_rgba(168,85,247,0.5)]"></div>
-            )}
+            <span className="hidden shrink-0 sm:inline-flex">{item.icon}</span>
+            <span className="truncate">{item.label}</span>
           </button>
         ))}
       </div>
 
-      <div className="flex flex-col gap-4 border-t border-white/5 pt-6 w-full px-2">
-        <button className="text-gray-600 hover:text-gray-400 transition-colors p-3 hover:bg-white/5 rounded-xl flex justify-center">
-          <Settings size={18} />
-        </button>
-      </div>
-    </div>
+      <button
+        type="button"
+        aria-label="Settings"
+        className={cn(
+          'flex w-8 shrink-0 items-center justify-center border-l border-border text-secondary transition-colors hover:bg-surface-secondary hover:text-text lg:h-8 lg:w-full lg:justify-start lg:border-l-0 lg:border-t lg:px-3',
+          focusRing
+        )}
+      >
+        <Settings size={14} />
+      </button>
+    </nav>
   );
 };
 

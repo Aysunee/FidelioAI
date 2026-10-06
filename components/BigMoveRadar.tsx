@@ -2,7 +2,79 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useSignals } from '../context/SignalContext';
 import { BigMoveSignal } from '../types';
 import { formatPrice } from '../utils/formatters';
-import { ArrowUpRight, ArrowDownRight, Activity, TrendingUp, TrendingDown, Clock, Zap, AlertTriangle, PlayCircle, PauseCircle, Filter, Link, BarChart2, Globe, Search } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, Activity, TrendingUp, TrendingDown, Zap, AlertTriangle, PlayCircle, PauseCircle, Filter, Link, BarChart2, Globe, Search } from 'lucide-react';
+
+const FOCUS_RING = 'focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
+const SEGMENT = `h-6 rounded-sm px-1.5 text-[11px] transition-colors whitespace-nowrap ${FOCUS_RING}`;
+const SEGMENT_ACTIVE = 'bg-surface-highlight text-text';
+const SEGMENT_IDLE = 'text-secondary hover:text-text';
+const ROW_ACTION = `grid h-5 w-5 place-items-center rounded-sm text-secondary transition-colors hover:bg-surface-highlight hover:text-text ${FOCUS_RING}`;
+
+// One table line when the panel itself (not the viewport) is wide enough, two compact lines otherwise.
+const ROW =
+    'grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 border-b border-border px-3 py-1 text-xs hover:bg-surface-secondary [@container(min-width:520px)]:h-7 [@container(min-width:520px)]:grid-cols-[140px_minmax(0,1fr)_160px_60px] [@container(min-width:520px)]:py-0';
+
+// ---------------------------------------------------------------------------
+// Big-move wording, shared with PerpBigMoveRadar and the FidelioRadar anomaly strip.
+// A record says what was measured ("5 dk'da +%2.31", "Yeni 24s zirve"); it never says what comes next.
+// ---------------------------------------------------------------------------
+
+const TIMEFRAME_TEXT: Record<NonNullable<BigMoveSignal['timeframe']>, string> = {
+    '1m': "1 dk'da",
+    '5m': "5 dk'da",
+    '15m': "15 dk'da",
+    '2h': '2 saatte',
+    '24h': '24 saatte',
+    '7d': '7 günde',
+    '30d': '30 günde'
+};
+
+export const bigMoveTimeframeText = (timeframe: BigMoveSignal['timeframe']): string =>
+    (timeframe ? TIMEFRAME_TEXT[timeframe] : '') || '';
+
+// Size of the move in percent (always positive). Older records carry it only inside the description text.
+export const bigMovePercent = (move: BigMoveSignal): number | null => {
+    if (typeof move.changePercent === 'number' && Number.isFinite(move.changePercent)) return Math.abs(move.changePercent);
+    const match = /(\d+(?:[.,]\d+)?)\s*%|%\s*(\d+(?:[.,]\d+)?)/.exec(move.description || '');
+    if (!match) return null;
+    const value = Number((match[1] ?? match[2]).replace(',', '.'));
+    return Number.isFinite(value) ? value : null;
+};
+
+export const describeBigMove = (move: BigMoveSignal): string => {
+    const pct = bigMovePercent(move);
+    switch (move.type) {
+        case 'RISE':
+        case 'FALL': {
+            const span = bigMoveTimeframeText(move.timeframe);
+            if (pct === null || !span) return move.description;
+            return `${span} ${move.type === 'RISE' ? '+' : '−'}%${pct.toFixed(2)}`;
+        }
+        case 'HIGH': return 'Yeni 24s zirve';
+        case 'LOW': return 'Yeni 24s dip';
+        case 'PULLBACK': return pct === null ? 'Zirveden geri çekilme' : `Zirveden geri çekilme −%${pct.toFixed(1)}`;
+        case 'RALLY': return pct === null ? 'Dipten toparlanma' : `Dipten toparlanma +%${pct.toFixed(1)}`;
+        default: return move.description;
+    }
+};
+
+// Size class of the move (a bucket of the measured percent, not a rating).
+export const BIG_MOVE_LEVEL_TEXT: Record<BigMoveSignal['level'], string> = { HIGH: 'Büyük', MID: 'Orta', SMALL: 'Küçük' };
+
+export const BIG_MOVE_LEVEL_FILTERS: { key: 'ALL' | BigMoveSignal['level']; label: string }[] = [
+    { key: 'ALL', label: 'Tümü' },
+    { key: 'HIGH', label: 'Büyük' },
+    { key: 'MID', label: 'Orta' },
+    { key: 'SMALL', label: 'Küçük' }
+];
+
+const TYPE_FILTERS: { key: 'ALL' | 'RISE' | 'FALL' | 'HIGH' | 'LOW'; label: string }[] = [
+    { key: 'ALL', label: 'Tümü' },
+    { key: 'RISE', label: 'Yükseliş' },
+    { key: 'FALL', label: 'Düşüş' },
+    { key: 'HIGH', label: '24s zirve' },
+    { key: 'LOW', label: '24s dip' }
+];
 
 export const BigMoveRadar: React.FC = () => {
     const { bigMoves } = useSignals();
@@ -40,114 +112,94 @@ export const BigMoveRadar: React.FC = () => {
 
     const getIcon = (type: BigMoveSignal['type']) => {
         switch (type) {
-            case 'RISE': return <TrendingUp size={12} className="text-emerald-400" />;
-            case 'FALL': return <TrendingDown size={12} className="text-rose-400" />;
-            case 'HIGH': return <ArrowUpRight size={12} className="text-amber-400" />;
-            case 'LOW': return <ArrowDownRight size={12} className="text-purple-400" />;
-            case 'PULLBACK': return <Activity size={12} className="text-orange-400" />;
-            case 'RALLY': return <Activity size={12} className="text-blue-400" />;
-            case 'VOL_SPIKE': return <Zap size={12} className="text-yellow-400" />;
-            default: return <AlertTriangle size={12} className="text-gray-400" />;
+            case 'RISE': return <TrendingUp size={12} className="shrink-0 text-success" />;
+            case 'FALL': return <TrendingDown size={12} className="shrink-0 text-danger" />;
+            case 'HIGH': return <ArrowUpRight size={12} className="shrink-0 text-warning" />;
+            case 'LOW': return <ArrowDownRight size={12} className="shrink-0 text-primary" />;
+            case 'PULLBACK': return <Activity size={12} className="shrink-0 text-warning" />;
+            case 'RALLY': return <Activity size={12} className="shrink-0 text-info" />;
+            case 'VOL_SPIKE': return <Zap size={12} className="shrink-0 text-warning" />;
+            default: return <AlertTriangle size={12} className="shrink-0 text-secondary" />;
         }
     };
 
     const getLevelColor = (level: BigMoveSignal['level']) => {
         switch (level) {
-            case 'HIGH': return 'bg-rose-500/20 text-rose-400 border-rose-500/30';
-            case 'MID': return 'bg-amber-500/20 text-amber-400 border-amber-500/30';
-            case 'SMALL': return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
-            default: return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
-        }
-    };
-
-    const getCardIntensity = (level: BigMoveSignal['level']) => {
-        switch (level) {
-            case 'HIGH': return 'border-white/10 bg-gradient-to-br from-amber-500/30 to-yellow-500/20 animate-pulse';
-            case 'MID': return 'border-white/10 bg-gradient-to-br from-amber-500/20 to-yellow-500/12';
-            case 'SMALL': return 'border-white/10 bg-gradient-to-br from-amber-500/12 to-yellow-500/6';
-            default: return 'border-white/5 bg-white/5';
+            case 'HIGH': return 'bg-danger-soft text-danger';
+            case 'MID': return 'bg-warning-soft text-warning';
+            default: return 'bg-surface-secondary text-secondary';
         }
     };
 
     return (
-        <div className="backdrop-blur-xl bg-white/5 border border-white/10 rounded-lg flex flex-col overflow-hidden shadow-[0_0_40px_rgba(251,191,36,0.1)] h-full">
+        <section lang="tr" className="flex h-full min-h-0 min-w-0 flex-col bg-surface [container-type:inline-size] lg:max-h-[100dvh]">
             {/* Header */}
-            <div className="p-2 border-b border-white/10 bg-gradient-to-r from-amber-600/20 to-orange-600/20 flex items-center gap-2 overflow-x-auto scrollbar-none">
-                <div className="flex items-center gap-2 shrink-0">
-                    <div className="relative">
-                        <div className="absolute inset-0 bg-amber-500/30 rounded-full animate-ping"></div>
-                        <Activity size={16} className="text-amber-400 relative z-10" />
+            <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+                <h2 className="truncate text-[11px] font-semibold uppercase tracking-wider text-secondary" title="Binance spot: kısa sürede büyük fiyat değişimi ve yeni 24 saatlik uçlar">Spot Büyük Hareket</h2>
+
+                <div className="flex shrink-0 items-center gap-1">
+                    {/* Search Bar */}
+                    <div className="relative w-28">
+                        <Search size={12} className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-muted" />
+                        <input
+                            type="text"
+                            placeholder="Ara..."
+                            aria-label="Sembol ara"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            className="h-6 w-full rounded-sm border border-border bg-surface-secondary pl-6 pr-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary"
+                        />
                     </div>
-                    <span className="font-bold text-sm text-gray-200 whitespace-nowrap">Spot Big Move</span>
+
+                    <button
+                        onClick={() => setIsPaused(!isPaused)}
+                        className={`grid h-7 w-7 place-items-center rounded-sm transition-colors hover:bg-surface-secondary hover:text-text ${FOCUS_RING} ${isPaused ? 'text-warning' : 'text-secondary'}`}
+                        title={isPaused ? 'Güncellemeyi sürdür' : 'Güncellemeyi duraklat'}
+                        aria-label={isPaused ? 'Güncellemeyi sürdür' : 'Güncellemeyi duraklat'}
+                    >
+                        {isPaused ? <PlayCircle size={14} /> : <PauseCircle size={14} />}
+                    </button>
                 </div>
+            </header>
 
-                {/* Search Bar */}
-                <div className="relative w-24 shrink-0 mx-1">
-                    <Search size={10} className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
-                    <input
-                        type="text"
-                        placeholder="Search..."
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-full bg-black/20 border border-white/10 rounded px-2 py-1 pl-6 text-[10px] text-gray-300 placeholder-gray-500 focus:outline-none focus:border-amber-500/50 transition-colors"
-                    />
-                </div>
-
-                <div className="h-4 w-px bg-white/10 shrink-0" />
-
-                {/* Filter Buttons - Single Row */}
-                <div className="flex items-center gap-1 shrink-0">
-                    {['ALL', 'RISE', 'FALL', 'HIGH', 'LOW'].map((type) => (
+            {/* Filters */}
+            <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-[3px]">
+                <div className="inline-flex rounded-sm border border-border p-0.5">
+                    {TYPE_FILTERS.map(({ key, label }) => (
                         <button
-                            key={type}
-                            onClick={() => setFilterType(type as any)}
-                            className={`px-1.5 py-0 text-[8px] font-bold rounded transition-all whitespace-nowrap ${filterType === type
-                                ? 'bg-amber-500/30 text-amber-300 border border-amber-500/50'
-                                : 'bg-white/5 text-gray-500 hover:text-gray-300'}`}
+                            key={key}
+                            onClick={() => setFilterType(key)}
+                            className={`${SEGMENT} ${filterType === key ? SEGMENT_ACTIVE : SEGMENT_IDLE}`}
                         >
-                            {type}
+                            {label}
                         </button>
                     ))}
                 </div>
 
-                <div className="h-4 w-px bg-white/10 shrink-0" />
-
-                <div className="flex items-center gap-1 shrink-0">
-                    {['ALL', 'HIGH', 'MID', 'SMALL'].map((level) => (
+                <div className="inline-flex rounded-sm border border-border p-0.5" title="Hareketin büyüklük sınıfı">
+                    {BIG_MOVE_LEVEL_FILTERS.map(({ key, label }) => (
                         <button
-                            key={level}
-                            onClick={() => setFilterLevel(level as any)}
-                            className={`px-1.5 py-0 text-[8px] font-bold rounded transition-all whitespace-nowrap ${filterLevel === level
-                                ? 'bg-amber-500/30 text-amber-300 border border-amber-500/50'
-                                : 'bg-white/5 text-gray-500 hover:text-gray-300'}`}
+                            key={key}
+                            onClick={() => setFilterLevel(key)}
+                            className={`${SEGMENT} ${filterLevel === key ? SEGMENT_ACTIVE : SEGMENT_IDLE}`}
                         >
-                            {level}
+                            {label}
                         </button>
                     ))}
                 </div>
-
-                <div className="flex-1" />
-
-                <button
-                    onClick={() => setIsPaused(!isPaused)}
-                    className="text-gray-400 hover:text-white transition-colors shrink-0"
-                    title={isPaused ? "Resume Updates" : "Pause Updates"}
-                >
-                    {isPaused ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
-                </button>
             </div>
 
             {/* List */}
             <div
-                className="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent"
+                className="max-h-[360px] min-h-0 flex-1 overflow-y-auto lg:max-h-none"
                 onMouseEnter={() => setIsHovering(true)}
                 onMouseLeave={() => setIsHovering(false)}
             >
                 {displayMoves.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center text-gray-600 p-4 text-center">
-                        <Filter size={24} className="mb-2 opacity-30" />
-                        <p className="text-xs">No moves found</p>
-                        <p className="text-[10px] mt-1 text-gray-700">Adjust filters or wait for signals.</p>
+                    <div className="flex h-full flex-col items-center justify-center gap-1 px-3 py-8 text-center text-xs text-muted">
+                        <Filter size={14} />
+                        <p>Kayıt yok</p>
+                        <p className="text-[11px]">Açılıştan sonra oluşan hareketler burada listelenir. Filtre seçiliyse değiştirmeyi deneyin.</p>
                     </div>
                 ) : (
                     displayMoves.map((move) => (
@@ -157,62 +209,55 @@ export const BigMoveRadar: React.FC = () => {
                                 const symbol = move.symbol.replace('USDT', '_USDT');
                                 window.open(`https://www.binance.com/en/trade/${symbol}?type=spot`, '_blank');
                             }}
-                            className={`p-1.5 rounded-lg border hover:scale-[1.01] transition-all group animate-in slide-in-from-left-2 duration-300 cursor-pointer ${getCardIntensity(move.level)}`}
+                            className={ROW}
                         >
-                            <div className="flex justify-between items-start mb-1">
-                                <div className="flex items-center gap-1">
-                                    <div className={`p-0.5 rounded-full bg-white/5 group-hover:scale-110 transition-transform`}>
-                                        {getIcon(move.type)}
-                                    </div>
-                                    <div>
-                                        <div className="flex items-center gap-1">
-                                            <span className="font-bold text-[10px] text-gray-200">{move.symbol.replace('USDT', '')}</span>
-                                            <span className={`text-[9px] font-bold px-1.5 py-0 rounded border ${getLevelColor(move.level)}`}>
-                                                {move.level}
-                                            </span>
-                                        </div>
-                                        <div className="text-[9px] text-gray-400">{move.description}</div>
-                                    </div>
-                                </div>
-                                <div className="flex flex-col items-end">
-                                    <span className="text-[10px] font-mono font-medium text-gray-300">
-                                        ${formatPrice(move.price)}
-                                    </span>
-                                    <span className="text-[9px] text-gray-600 flex items-center gap-1">
-                                        <Clock size={8} />
-                                        {new Date(move.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                                    </span>
-                                </div>
+                            <div className="order-1 flex min-w-0 items-center gap-1.5 [@container(min-width:520px)]:order-none">
+                                {getIcon(move.type)}
+                                <span className="truncate font-medium text-text">{move.symbol.replace('USDT', '')}</span>
+                                <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase ${getLevelColor(move.level)}`} title="Hareketin büyüklük sınıfı">
+                                    {BIG_MOVE_LEVEL_TEXT[move.level] ?? move.level}
+                                </span>
+                            </div>
+
+                            <div className="order-3 min-w-0 truncate text-[11px] text-secondary [@container(min-width:520px)]:order-none" title={move.description}>
+                                {describeBigMove(move)}
+                            </div>
+
+                            <div className="order-2 flex items-center justify-end gap-2 font-mono [@container(min-width:520px)]:order-none">
+                                <span className="text-text">${formatPrice(move.price)}</span>
+                                <span className="text-[10px] text-muted">
+                                    {new Date(move.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                </span>
                             </div>
 
                             {/* Action Buttons */}
-                            <div className="flex justify-end gap-1 mt-1 pt-1 border-t border-white/5" onClick={(e) => e.stopPropagation()}>
+                            <div className="order-4 flex items-center justify-end [@container(min-width:520px)]:order-none" onClick={(e) => e.stopPropagation()}>
                                 <button
                                     onClick={() => window.open(`https://www.binance.com/en/trade/${move.symbol.replace('USDT', '_USDT')}?type=spot`, '_blank')}
-                                    className="p-1 hover:bg-white/10 rounded text-gray-500 hover:text-amber-400 transition-colors"
+                                    className={ROW_ACTION}
                                     title="Binance Spot"
                                 >
-                                    <Link size={10} />
+                                    <Link size={12} />
                                 </button>
                                 <button
                                     onClick={() => window.open(`https://www.tradingview.com/chart/?symbol=BINANCE:${move.symbol}`, '_blank')}
-                                    className="p-1 hover:bg-white/10 rounded text-gray-500 hover:text-blue-400 transition-colors"
+                                    className={ROW_ACTION}
                                     title="TradingView"
                                 >
-                                    <BarChart2 size={10} />
+                                    <BarChart2 size={12} />
                                 </button>
                                 <button
                                     onClick={() => window.open(`https://coinmarketcap.com/currencies/search/?q=${move.symbol.replace('USDT', '')}`, '_blank')}
-                                    className="p-1 hover:bg-white/10 rounded text-gray-500 hover:text-blue-500 transition-colors"
+                                    className={ROW_ACTION}
                                     title="CoinMarketCap"
                                 >
-                                    <Globe size={10} />
+                                    <Globe size={12} />
                                 </button>
                             </div>
                         </div>
                     ))
                 )}
-            </div >
-        </div >
+            </div>
+        </section>
     );
 };

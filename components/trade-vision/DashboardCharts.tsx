@@ -2,24 +2,30 @@ import React, { useMemo } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Cell } from 'recharts';
 import { Trade } from './types';
 import { cn } from '@/utils/cn';
+import { formatSignedUsd, getClosedTrades, getSignedPnl, getTradeTimestamp, parseTradeDate } from './tradeMath';
+import { badge, badgeAccent, chartColors, emptyLine, menuSurface, panelHeader, panelTitle } from './styles';
 
 interface DashboardChartsProps {
     trades: Trade[];
 }
 
+const AXIS_TICK = { fontSize: 10, fill: chartColors.axis };
+
 const DashboardCharts: React.FC<DashboardChartsProps> = ({ trades }) => {
     // Equity Curve Data
+    // OPEN trades have no realised P&L and are excluded from the curve.
     const equityData = useMemo(() => {
         let runningTotal = 0;
-        const sortedTrades = [...trades].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        const sortedTrades = getClosedTrades(trades).sort((a, b) => getTradeTimestamp(a) - getTradeTimestamp(b));
 
         return sortedTrades.map((t, index) => {
-            runningTotal += (t.status === 'WIN' ? t.returnVal : -t.returnVal);
+            const pnl = getSignedPnl(t);
+            runningTotal += pnl;
             return {
                 name: index + 1,
                 date: t.date,
                 value: runningTotal,
-                pnl: (t.status === 'WIN' ? t.returnVal : -t.returnVal)
+                pnl
             };
         });
     }, [trades]);
@@ -27,25 +33,25 @@ const DashboardCharts: React.FC<DashboardChartsProps> = ({ trades }) => {
     // Daily P&L Data
     const dailyData = useMemo(() => {
         const days: Record<string, number> = {};
-        trades.forEach(t => {
+        getClosedTrades(trades).forEach(t => {
             const date = t.date;
-            const val = (t.status === 'WIN' ? t.returnVal : -t.returnVal);
-            days[date] = (days[date] || 0) + val;
+            days[date] = (days[date] || 0) + getSignedPnl(t);
         });
 
+        // Chronological order; keep the latest 10 days.
         return Object.entries(days)
             .map(([date, value]) => ({ date, value }))
-            .sort((a, b) => new Date(a.date).getTime() - new Date(a.date).getTime())
+            .sort((a, b) => parseTradeDate(a.date).getTime() - parseTradeDate(b.date).getTime())
             .slice(-10);
     }, [trades]);
 
     const CustomTooltip = ({ active, payload }: any) => {
         if (active && payload && payload.length) {
             return (
-                <div className="bg-gray-950/90 border border-white/10 p-4 rounded-xl shadow-2xl backdrop-blur-xl">
-                    <div className="text-[9px] font-black text-gray-500 uppercase tracking-widest mb-1">{payload[0].payload.date}</div>
-                    <div className="text-sm font-black text-white tabular-nums">
-                        ${payload[0].value.toLocaleString()}
+                <div className={cn(menuSurface, 'px-2 py-1.5')}>
+                    <div className="text-[10px] uppercase tracking-wider text-muted">{payload[0].payload.date}</div>
+                    <div className={cn('font-mono text-xs font-semibold', payload[0].value >= 0 ? 'text-success' : 'text-danger')}>
+                        {formatSignedUsd(payload[0].value)}
                     </div>
                 </div>
             );
@@ -54,84 +60,84 @@ const DashboardCharts: React.FC<DashboardChartsProps> = ({ trades }) => {
     };
 
     return (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[500px] lg:h-72">
+        <div className="grid shrink-0 grid-cols-1 gap-px bg-border lg:grid-cols-3">
             {/* Equity Curve */}
-            <div className="lg:col-span-2 bg-white/[0.02] backdrop-blur-md rounded-2xl border border-white/5 p-6 flex flex-col h-full overflow-hidden group">
-                <div className="flex justify-between items-center mb-6">
-                    <h3 className="text-gray-500 text-[9px] font-black uppercase tracking-[0.2em]">Sample Performance Curve</h3>
-                    <div className="flex gap-2">
-                        <span className="text-[8px] font-black bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded-lg border border-purple-500/20 uppercase tracking-tighter">Cumulative Net</span>
-                    </div>
+            <section className="flex h-56 min-w-0 flex-col bg-surface lg:col-span-2">
+                <header className={panelHeader}>
+                    <h2 className={cn(panelTitle, 'truncate')}>Sample Performance Curve</h2>
+                    <span className={cn(badge, badgeAccent)}>Cumulative Net</span>
+                </header>
+                <div className="min-h-0 w-full flex-1 p-2">
+                    {equityData.length === 0 ? (
+                        <div className={emptyLine}>Henüz kapalı işlem yok</div>
+                    ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={equityData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
+                                <CartesianGrid stroke={chartColors.grid} vertical={false} />
+                                <XAxis
+                                    dataKey="name"
+                                    hide={true}
+                                />
+                                <YAxis
+                                    orientation="right"
+                                    width={48}
+                                    tick={AXIS_TICK}
+                                    axisLine={false}
+                                    tickLine={false}
+                                    tickFormatter={(val) => `$${val > 999 ? (val / 1000).toFixed(1) + 'k' : val}`}
+                                />
+                                <Tooltip content={<CustomTooltip />} cursor={{ stroke: chartColors.cursorLine }} />
+                                <Area
+                                    type="monotone"
+                                    dataKey="value"
+                                    stroke={chartColors.brand}
+                                    strokeWidth={1.5}
+                                    fill={chartColors.brand}
+                                    fillOpacity={0.12}
+                                    isAnimationActive={false}
+                                />
+                            </AreaChart>
+                        </ResponsiveContainer>
+                    )}
                 </div>
-                <div className="flex-1 w-full min-h-0">
-                    <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={equityData}>
-                            <defs>
-                                <linearGradient id="colorEquity" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="5%" stopColor="#a855f7" stopOpacity={0.2} />
-                                    <stop offset="95%" stopColor="#a855f7" stopOpacity={0} />
-                                </linearGradient>
-                            </defs>
-                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                            <XAxis
-                                dataKey="name"
-                                hide={true}
-                            />
-                            <YAxis
-                                orientation="right"
-                                tick={{ fontSize: 9, fill: 'rgba(255,255,255,0.3)', fontWeight: 600 }}
-                                axisLine={false}
-                                tickLine={false}
-                                tickFormatter={(val) => `$${val > 999 ? (val / 1000).toFixed(1) + 'k' : val}`}
-                            />
-                            <Tooltip content={<CustomTooltip />} />
-                            <Area
-                                type="monotone"
-                                dataKey="value"
-                                stroke="#a855f7"
-                                strokeWidth={2}
-                                fillOpacity={1}
-                                fill="url(#colorEquity)"
-                                animationDuration={2000}
-                            />
-                        </AreaChart>
-                    </ResponsiveContainer>
-                </div>
-            </div>
+            </section>
 
             {/* Daily Net P&L */}
-            <div className="lg:col-span-1 bg-white/[0.02] backdrop-blur-md rounded-2xl border border-white/5 p-6 flex flex-col h-full overflow-hidden group">
-                <div className="flex justify-between items-center mb-6">
-                    <h3 className="text-gray-500 text-[9px] font-black uppercase tracking-[0.2em]">Daily Variance</h3>
+            <section className="flex h-56 min-w-0 flex-col bg-surface lg:col-span-1">
+                <header className={panelHeader}>
+                    <h2 className={cn(panelTitle, 'truncate')}>Daily Variance</h2>
+                </header>
+                <div className="min-h-0 w-full flex-1 p-2">
+                    {dailyData.length === 0 ? (
+                        <div className={emptyLine}>Henüz kapalı işlem yok</div>
+                    ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={dailyData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
+                                <CartesianGrid stroke={chartColors.grid} vertical={false} />
+                                <XAxis
+                                    dataKey="date"
+                                    tick={AXIS_TICK}
+                                    axisLine={false}
+                                    tickLine={false}
+                                    tickFormatter={(val) => val.split(',')[0]}
+                                />
+                                <Tooltip
+                                    cursor={{ fill: chartColors.cursor }}
+                                    content={<CustomTooltip />}
+                                />
+                                <Bar dataKey="value" isAnimationActive={false} maxBarSize={28}>
+                                    {dailyData.map((entry, index) => (
+                                        <Cell
+                                            key={`cell-${index}`}
+                                            fill={entry.value >= 0 ? chartColors.success : chartColors.danger}
+                                        />
+                                    ))}
+                                </Bar>
+                            </BarChart>
+                        </ResponsiveContainer>
+                    )}
                 </div>
-                <div className="flex-1 w-full min-h-0">
-                    <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={dailyData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                            <XAxis
-                                dataKey="date"
-                                tick={{ fontSize: 8, fill: 'rgba(255,255,255,0.3)', fontWeight: 600 }}
-                                axisLine={false}
-                                tickLine={false}
-                                tickFormatter={(val) => val.split(',')[0]}
-                            />
-                            <Tooltip
-                                cursor={{ fill: 'rgba(255,255,255,0.02)' }}
-                                content={<CustomTooltip />}
-                            />
-                            <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                                {dailyData.map((entry, index) => (
-                                    <Cell
-                                        key={`cell-${index}`}
-                                        fill={entry.value >= 0 ? 'rgba(16, 185, 129, 0.4)' : 'rgba(244, 63, 94, 0.4)'}
-                                        className="transition-all duration-500 hover:opacity-100 opacity-70"
-                                    />
-                                ))}
-                            </Bar>
-                        </BarChart>
-                    </ResponsiveContainer>
-                </div>
-            </div>
+            </section>
         </div>
     );
 };

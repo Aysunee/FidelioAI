@@ -5,6 +5,7 @@ interface UserStatsCardsProps {
     users: User[];
 }
 
+// KPI strip: one row of cells separated by 1px lines (2x2 on narrow screens).
 const UserStatsCards: React.FC<UserStatsCardsProps> = ({ users }) => {
     const activeUsers = users.filter(u => u.status === 'active').length;
     const roleBreakdown = users.reduce((acc, user) => {
@@ -16,50 +17,35 @@ const UserStatsCards: React.FC<UserStatsCardsProps> = ({ users }) => {
         {
             label: 'Total Users',
             value: users.length,
-            color: 'from-purple-500 to-blue-500',
-            bgColor: 'bg-purple-500/10',
-            borderColor: 'border-purple-500/20'
+            color: 'text-text'
         },
         {
             label: 'Active Users',
             value: activeUsers,
-            color: 'from-emerald-500 to-green-500',
-            bgColor: 'bg-emerald-500/10',
-            borderColor: 'border-emerald-500/20'
+            color: 'text-success'
         },
         {
             label: 'Admins',
             value: roleBreakdown.admin || 0,
-            color: 'from-amber-500 to-orange-500',
-            bgColor: 'bg-amber-500/10',
-            borderColor: 'border-amber-500/20'
+            color: 'text-primary'
         },
         {
             label: 'Traders',
             value: roleBreakdown.trader || 0,
-            color: 'from-blue-500 to-cyan-500',
-            bgColor: 'bg-blue-500/10',
-            borderColor: 'border-blue-500/20'
+            color: 'text-info'
         }
     ];
 
     return (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid shrink-0 grid-cols-2 gap-px border-b border-border bg-border lg:grid-cols-4">
             {stats.map((stat, index) => (
-                <div
-                    key={index}
-                    className={`${stat.bgColor} border ${stat.borderColor} rounded-xl p-4 backdrop-blur-sm`}
-                >
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">
-                                {stat.label}
-                            </p>
-                            <p className={`text-3xl font-black bg-gradient-to-r ${stat.color} bg-clip-text text-transparent`}>
-                                {stat.value}
-                            </p>
-                        </div>
-                    </div>
+                <div key={index} className="min-w-0 bg-surface px-3 py-2">
+                    <p className="truncate text-[10px] uppercase tracking-wider text-muted">
+                        {stat.label}
+                    </p>
+                    <p className={`font-mono text-base font-semibold ${stat.color}`}>
+                        {stat.value}
+                    </p>
                 </div>
             ))}
         </div>

@@ -4,6 +4,7 @@ import { Trade } from './types';
 import { FilterState } from '../TradeVisionDashboard';
 import { cn } from '@/utils/cn';
 import { ExportButton } from './ExportButton';
+import { badge, badgeAccent, btnCompact, btnDefault, btnPrimary, menuSurface } from './styles';
 
 interface HeaderProps {
   filters: FilterState;
@@ -11,24 +12,28 @@ interface HeaderProps {
   onClear: () => void;
   onOpenModal: () => void;
   onOpenCalculator: () => void;
+  /** Filtered trades (used for export). */
   trades: Trade[];
+  /** Full, unfiltered list: dropdown options must not shrink when a filter is active. */
+  allTrades?: Trade[];
 }
 
+const focusRing = 'focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
 
-
-const Header: React.FC<HeaderProps> = ({ filters, onFilterChange, onClear, onOpenModal, onOpenCalculator, trades }) => {
+const Header: React.FC<HeaderProps> = ({ filters, onFilterChange, onClear, onOpenModal, onOpenCalculator, trades, allTrades }) => {
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
+  const optionSource = allTrades ?? trades;
 
   const getUnique = (key: keyof Trade) => {
     if (key === 'setups') {
-      const all = trades.flatMap(t => t.setups);
+      const all = optionSource.flatMap(t => t.setups);
       return Array.from(new Set(all));
     }
     if (key === 'tags') {
-      const all = trades.flatMap(t => t.tags || []);
+      const all = optionSource.flatMap(t => t.tags || []);
       return Array.from(new Set(all));
     }
-    return Array.from(new Set(trades.map(t => t[key] as string)));
+    return Array.from(new Set(optionSource.map(t => t[key] as string)));
   };
 
   const filterConfigs = [
@@ -39,81 +44,101 @@ const Header: React.FC<HeaderProps> = ({ filters, onFilterChange, onClear, onOpe
     { label: 'TAGS', key: 'tag' as keyof FilterState, options: getUnique('tags' as any) },
   ];
 
+  const activeFilters = Object.entries(filters).filter(([, value]) => value);
+
   return (
-    <div className="bg-white/[0.01] px-2 py-4 border-b border-white/5 z-30">
-      <div className="flex flex-col md:flex-row items-center justify-between gap-4 mb-4">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-4 text-[10px] font-black text-gray-500 relative tracking-widest uppercase">
-            {filterConfigs.map((cfg) => (
-              <div key={cfg.label} className="relative">
-                <button
-                  onClick={() => setActiveMenu(activeMenu === cfg.label ? null : cfg.label)}
+    <div className="relative z-30 shrink-0 bg-surface">
+      {/* Toolbar: filters on the left, actions on the right (wraps on narrow screens) */}
+      <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 lg:py-0">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-medium uppercase tracking-wider text-secondary sm:gap-x-3">
+          {filterConfigs.map((cfg, idx) => (
+            <div key={cfg.label} className="relative">
+              <button
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={activeMenu === cfg.label}
+                onClick={() => setActiveMenu(activeMenu === cfg.label ? null : cfg.label)}
+                className={cn(
+                  'flex h-6 items-center gap-1 rounded-sm uppercase tracking-wider transition-colors hover:text-text',
+                  focusRing,
+                  filters[cfg.key] ? 'text-primary' : ''
+                )}
+              >
+                {cfg.label} <ChevronDown size={12} />
+              </button>
+
+              {activeMenu === cfg.label && (
+                <div
+                  role="menu"
                   className={cn(
-                    "flex items-center gap-1 hover:text-white transition-colors",
-                    filters[cfg.key] ? 'text-purple-400' : ''
+                    'absolute top-full z-50 mt-1 max-h-64 w-44 overflow-y-auto py-1',
+                    menuSurface,
+                    // The last menus open towards the left on narrow screens so they never leave the viewport.
+                    idx >= 3 ? 'right-0 lg:left-0 lg:right-auto' : 'left-0'
                   )}
                 >
-                  {cfg.label} <ChevronDown size={12} />
-                </button>
-
-                {activeMenu === cfg.label && (
-                  <div className="absolute top-full left-0 mt-2 w-48 bg-gray-950/90 border border-white/10 rounded-xl shadow-2xl py-2 z-50 backdrop-blur-xl">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { onFilterChange(cfg.key, null); setActiveMenu(null); }}
+                    className="flex h-7 w-full items-center px-3 text-left text-xs uppercase text-muted transition-colors hover:bg-surface-secondary hover:text-text"
+                  >
+                    All {cfg.label}
+                  </button>
+                  {cfg.options.map(opt => (
                     <button
-                      onClick={() => { onFilterChange(cfg.key, null); setActiveMenu(null); }}
-                      className="w-full text-left px-4 py-2 hover:bg-white/5 text-gray-500 hover:text-white transition-colors"
+                      type="button"
+                      role="menuitem"
+                      key={opt}
+                      onClick={() => { onFilterChange(cfg.key, opt); setActiveMenu(null); }}
+                      className={cn(
+                        'flex h-7 w-full items-center px-3 text-left text-xs uppercase transition-colors hover:bg-surface-secondary',
+                        filters[cfg.key] === opt ? 'bg-surface-highlight text-primary' : 'text-text'
+                      )}
                     >
-                      All {cfg.label}
+                      <span className="truncate">{opt}</span>
                     </button>
-                    {cfg.options.map(opt => (
-                      <button
-                        key={opt}
-                        onClick={() => { onFilterChange(cfg.key, opt); setActiveMenu(null); }}
-                        className={cn(
-                          "w-full text-left px-4 py-2 hover:bg-white/5 transition-colors",
-                          filters[cfg.key] === opt ? 'text-purple-400 bg-purple-400/5' : 'text-gray-400'
-                        )}
-                      >
-                        {opt}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-            <div className="h-4 w-[1px] bg-white/5 mx-2" />
-            <button className="text-purple-500 font-black hover:text-purple-400 transition-colors" onClick={onClear}>RESET</button>
-          </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          <div className="hidden h-3 w-px bg-border sm:block" />
+          <button
+            type="button"
+            className={cn('h-6 rounded-sm uppercase tracking-wider text-primary transition-opacity hover:opacity-80', focusRing)}
+            onClick={onClear}
+          >
+            RESET
+          </button>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={onOpenCalculator}
-            className="bg-white/5 hover:bg-white/10 border border-white/10 text-gray-400 hover:text-white px-4 py-2 rounded-xl font-bold text-[10px] tracking-widest transition-all flex items-center gap-2 active:scale-95 uppercase"
-          >
-            <Calculator size={14} /> Calculator
+        <div className="ml-auto flex items-center gap-1">
+          <button type="button" onClick={onOpenCalculator} className={cn(btnDefault, btnCompact)}>
+            <Calculator size={12} /> Calculator
           </button>
           <ExportButton trades={trades} />
-          <button
-            onClick={onOpenModal}
-            className="bg-gradient-to-r from-purple-500 to-indigo-500 hover:from-purple-400 hover:to-indigo-400 text-white px-5 py-2 rounded-xl font-black text-[10px] tracking-widest transition-all flex items-center gap-2 shadow-lg shadow-purple-500/20 active:scale-95 uppercase"
-          >
-            <Plus size={14} /> Add Trade
+          <button type="button" onClick={onOpenModal} className={cn(btnPrimary, btnCompact)}>
+            <Plus size={12} /> Add Trade
           </button>
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2 h-6">
-        {Object.entries(filters).map(([key, value]) => value && (
-          <div key={key} className="bg-purple-500/10 border border-purple-500/20 text-[9px] font-black text-purple-400 px-2 py-0.5 rounded-lg flex items-center gap-2 uppercase tracking-tighter">
-            {key}: {value}
-            <X
-              size={12}
-              className="cursor-pointer opacity-70 hover:opacity-100"
-              onClick={() => onFilterChange(key as keyof FilterState, null)}
-            />
-          </div>
-        ))}
-      </div>
+      {/* Active filters: thin sub-row, only while a filter is set */}
+      {activeFilters.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1 border-t border-border px-3 py-1">
+          {activeFilters.map(([key, value]) => (
+            <div key={key} className={cn(badge, badgeAccent)}>
+              {key}: {value}
+              <X
+                size={12}
+                className="cursor-pointer opacity-70 hover:opacity-100"
+                onClick={() => onFilterChange(key as keyof FilterState, null)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

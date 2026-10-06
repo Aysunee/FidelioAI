@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { GlassCard } from './ui/GlassCard';
 import { useMarketData } from '../context/MarketContext';
 import { useSignals } from '../context/SignalContext';
 import {
@@ -8,21 +7,27 @@ import {
     RefreshCw,
     Server,
     Share2,
-    Zap,
-    Database,
     Brain,
-    Activity,
     Lock,
     Globe,
-    AlertCircle,
     FlaskConical
 } from 'lucide-react';
 
-import { API_BASE_URL } from '../utils/config';
+import { API_BASE_URL, apiUrl, apiJson, ApiError } from '../utils/config';
+import { useUser } from '../context/UserContext';
+
+const SIGNAL_FETCH_LIMIT = 500;
+
+const PANEL_HEADER_CLASS = 'flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border px-3';
+const PANEL_TITLE_CLASS = 'flex shrink-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-secondary';
+const ICON_BUTTON_CLASS = 'grid h-6 w-6 shrink-0 place-items-center rounded-sm text-secondary transition-colors hover:bg-surface-secondary hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
+const DEFAULT_BUTTON_CLASS = 'flex h-7 shrink-0 items-center gap-1.5 rounded-sm border border-border bg-surface-secondary px-2.5 text-xs font-medium text-text transition-colors hover:bg-surface-highlight focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary disabled:opacity-50';
 
 export const SystemDiagnostics: React.FC = () => {
     const { marketData, futuresData, connectionStatus } = useMarketData();
     const { addToast } = useSignals();
+    const { user } = useUser();
+    const isAdmin = user?.role === 'admin';
 
     const [serverStatus, setServerStatus] = useState<'checking' | 'online' | 'offline'>('checking');
     const [apiLatency, setApiLatency] = useState<number | null>(null);
@@ -34,8 +39,10 @@ export const SystemDiagnostics: React.FC = () => {
     const checkServer = async () => {
         const start = Date.now();
         try {
-            const res = await fetch(`${API_BASE_URL}/health`);
-            if (res.ok) {
+            const res = await fetch(apiUrl('/health'));
+            // A static host's SPA fallback would answer 200 with index.html, so require the JSON body.
+            const data = res.ok ? await res.json().catch(() => null) : null;
+            if (data && data.status === 'ok') {
                 setServerStatus('online');
                 setApiLatency(Date.now() - start);
             } else {
@@ -48,36 +55,48 @@ export const SystemDiagnostics: React.FC = () => {
 
     const checkDatabase = async () => {
         try {
-            const res = await fetch(`${API_BASE_URL}/api/signals`);
-            const data = await res.json();
+            const data = await apiJson<unknown>(`/api/signals?limit=${SIGNAL_FETCH_LIMIT}`);
             setDbCount(Array.isArray(data) ? data.length : 0);
         } catch (e) {
             setDbCount(null);
         }
     };
 
+    // Read-only webhook check: POST with a deliberately invalid secret (and an invalid payload, so even
+    // an unprotected server would not store it). 401 means the endpoint is reachable AND protected.
+    // Plain fetch (not apiRequest) so the expected 401 does not log the admin out.
     const runWebhookTest = async () => {
         setIsTesting(true);
         try {
-            const res = await fetch(`${API_BASE_URL}/api/webhook`, {
+            const res = await fetch(apiUrl('/api/webhook'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    symbol: 'TEST-DIAG',
-                    side: 'BUY',
-                    price: 1337,
-                    strategy: 'Diagnostics_Test',
-                    note: 'Automated System Check'
+                    secret: `invalid-diagnostics-${Date.now()}`,
+                    symbol: '',
+                    side: 'DIAGNOSTICS',
+                    price: 0,
+                    strategy: 'Diagnostics_Check'
                 })
             });
-            if (res.ok) {
-                setLastTestResult('Webhook Success: Signal pushed to database and socket.');
-                addToast('Test Success', 'Diagnostic signal sent', 'success');
+            if (res.status === 401) {
+                setLastTestResult('Webhook OK: Uç nokta erişilebilir ve geçersiz gizli anahtarı reddediyor (401). Kayıt oluşturulmadı.');
+                addToast('Webhook korumalı', 'Geçersiz anahtarlı istek beklendiği gibi reddedildi.', 'success');
+            } else if (res.status === 503) {
+                setLastTestResult('Webhook kapalı: Sunucuda WEBHOOK_SECRET tanımlı değil (503).');
+            } else if (res.status === 429) {
+                setLastTestResult('Webhook hız sınırına takıldı (429). Biraz sonra tekrar deneyin.');
+            } else if (res.status === 400) {
+                setLastTestResult('UYARI: İstek gizli anahtar kontrolünden önce veri doğrulamasında reddedildi (400). Webhook gizli anahtarla korunmuyor olabilir.');
+                addToast('Webhook kontrol edilmeli', 'Gizli anahtar doğrulaması yapılmıyor olabilir.', 'alert');
+            } else if (res.ok) {
+                setLastTestResult(`UYARI: Webhook geçersiz gizli anahtarı kabul etti (${res.status}). Uç nokta korumasız olabilir!`);
+                addToast('Webhook korumasız', 'Geçersiz anahtarlı istek kabul edildi, sunucuyu kontrol edin.', 'alert');
             } else {
-                setLastTestResult('Webhook Failed: Server returned ' + res.status);
+                setLastTestResult(`Webhook beklenmeyen yanıt verdi: ${res.status}`);
             }
         } catch (e) {
-            setLastTestResult('Webhook Error: Could not reach server');
+            setLastTestResult('Webhook hatası: Sunucuya ulaşılamadı.');
         }
         setIsTesting(false);
     };
@@ -85,211 +104,231 @@ export const SystemDiagnostics: React.FC = () => {
     const runAiTest = async () => {
         setIsTesting(true);
         try {
-            const res = await fetch(`${API_BASE_URL}/api/analyze`, {
+            const data = await apiJson<{ text?: string; error?: string }>('/api/analyze', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     symbol: 'BTCUSDT',
                     prompt: 'Say "Diagnostics Connection OK"'
                 })
             });
-            const data = await res.json();
-            if (data.text) {
-                setLastTestResult('AI Response: ' + data.text);
-                addToast('AI OK', 'Gemini API connection verified', 'success');
+            if (data?.text) {
+                setLastTestResult('AI yanıtı: ' + data.text);
+                addToast('AI OK', 'Gemini API bağlantısı doğrulandı', 'success');
             } else {
-                setLastTestResult('AI Error: ' + (data.error || 'Unknown error'));
+                setLastTestResult('AI hatası: ' + (data?.error || 'Bilinmeyen hata'));
             }
         } catch (e) {
-            setLastTestResult('AI Connection Error: Ensure GEMINI_API_KEY is set');
+            const message = e instanceof ApiError ? e.message : 'Sunucuya ulaşılamadı.';
+            setLastTestResult('AI bağlantı hatası: ' + message);
         }
         setIsTesting(false);
     };
 
     useEffect(() => {
+        if (!isAdmin) return;
         checkServer();
         checkDatabase();
         // Socket check via signal context is harder to expose directly here without context change
         // but we can assume if dashboard is connected, WS is OK
-    }, []);
+    }, [isAdmin]);
 
     const StatusBadge = ({ state }: { state: 'online' | 'offline' | 'checking' }) => (
-        <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border ${state === 'online' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' :
-            state === 'offline' ? 'bg-rose-500/20 text-rose-400 border-rose-500/30' :
-                'bg-gray-500/20 text-gray-400 border-gray-500/30'
+        <div className={`inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 ${state === 'online' ? 'bg-success-soft text-success' :
+            state === 'offline' ? 'bg-danger-soft text-danger' :
+                'bg-surface-secondary text-secondary'
             }`}>
             {state === 'online' ? <CheckCircle2 size={10} /> : state === 'offline' ? <XCircle size={10} /> : <RefreshCw size={10} className="animate-spin" />}
             {state.toUpperCase()}
         </div>
     );
 
+    // One service check: status dot + label/detail + result + state.
+    const CheckRow = ({ state, label, detail, detailTitle, children }: {
+        state: 'online' | 'offline' | 'checking';
+        label: string;
+        detail: string;
+        detailTitle?: string;
+        children: React.ReactNode;
+    }) => (
+        <div className="flex items-center gap-3 border-b border-border px-3 py-1.5 last:border-b-0 hover:bg-surface-secondary">
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${state === 'online' ? 'bg-success' : state === 'offline' ? 'bg-danger' : 'bg-muted'}`} />
+            <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium text-text">{label}</div>
+                <div className="truncate text-[10px] text-muted" title={detailTitle}>{detail}</div>
+            </div>
+            <div className="shrink-0 text-right font-mono text-xs font-semibold text-text">{children}</div>
+            <div className="flex w-[84px] shrink-0 justify-end">
+                <StatusBadge state={state} />
+            </div>
+        </div>
+    );
+
+    if (!isAdmin) {
+        return (
+            <div className="flex h-full min-h-[120px] w-full flex-1 items-center justify-center gap-2 bg-surface px-3 text-xs text-muted">
+                <Lock size={14} className="shrink-0 text-danger" />
+                Bu görünüm yalnızca yöneticiler içindir.
+            </div>
+        );
+    }
+
     return (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid w-full flex-1 grid-cols-1 gap-px bg-border lg:h-full lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)] lg:grid-rows-[minmax(0,1fr)]">
             {/* Health Overview */}
-            <div className="lg:col-span-2 space-y-6">
-                <GlassCard className="p-6">
-                    <div className="flex items-center justify-between mb-8">
-                        <div className="flex items-center gap-3">
-                            <Server className="text-purple-400" />
-                            <div>
-                                <h3 className="font-bold text-gray-200">System Infrastructure</h3>
-                                <p className="text-xs text-gray-500">Live operational status of core services</p>
-                            </div>
+            <div className="flex min-w-0 flex-col gap-px lg:min-h-0">
+                <section className="flex shrink-0 flex-col bg-surface">
+                    <header className={PANEL_HEADER_CLASS}>
+                        <div className="flex min-w-0 items-baseline gap-2">
+                            <h3 className={PANEL_TITLE_CLASS}>
+                                <Server size={12} className="self-center" />
+                                System Infrastructure
+                            </h3>
+                            <p className="hidden truncate text-[11px] text-muted md:block">Live operational status of core services</p>
                         </div>
-                        <button onClick={() => { checkServer(); checkDatabase(); }} className="p-2 hover:bg-white/5 rounded-lg transition-colors">
-                            <RefreshCw size={16} className="text-gray-400" />
+                        <button onClick={() => { checkServer(); checkDatabase(); }} className={ICON_BUTTON_CLASS}>
+                            <RefreshCw size={14} />
                         </button>
-                    </div>
+                    </header>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {/* Server Card */}
-                        <div className="p-4 rounded-xl bg-white/5 border border-white/10 space-y-4">
-                            <div className="flex justify-between items-center">
-                                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Backend API</span>
-                                <StatusBadge state={serverStatus} />
-                            </div>
-                            <div className="flex items-center justify-between">
-                                <div className="text-2xl font-mono font-bold text-gray-200">{apiLatency || '--'} <span className="text-xs text-gray-600 font-sans">ms</span></div>
-                                <Activity size={24} className="text-purple-500 opacity-30" />
-                            </div>
-                            <div className="text-[10px] text-gray-500">Listening on port 3001</div>
-                        </div>
+                    <div>
+                        {/* Server */}
+                        <CheckRow
+                            state={serverStatus}
+                            label="Backend API"
+                            detail={`API: ${API_BASE_URL || 'aynı kaynak (same origin)'}`}
+                            detailTitle={API_BASE_URL || undefined}
+                        >
+                            {apiLatency || '--'} <span className="font-sans text-[10px] font-normal text-muted">ms</span>
+                        </CheckRow>
 
-                        {/* Database Card */}
-                        <div className="p-4 rounded-xl bg-white/5 border border-white/10 space-y-4">
-                            <div className="flex justify-between items-center">
-                                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Signals DB</span>
-                                <StatusBadge state={dbCount !== null ? 'online' : 'offline'} />
-                            </div>
-                            <div className="flex items-center justify-between">
-                                <div className="text-2xl font-mono font-bold text-gray-200">{dbCount ?? '--'} <span className="text-xs text-gray-600 font-sans">Signals</span></div>
-                                <Database size={24} className="text-amber-500 opacity-30" />
-                            </div>
-                            <div className="text-[10px] text-gray-500">MySQL Database persistence</div>
-                        </div>
+                        {/* Database */}
+                        <CheckRow
+                            state={dbCount !== null ? 'online' : 'offline'}
+                            label="Signals DB"
+                            detail="MySQL Database persistence"
+                        >
+                            {dbCount === null ? '--' : dbCount >= SIGNAL_FETCH_LIMIT ? `${SIGNAL_FETCH_LIMIT}+` : dbCount} <span className="font-sans text-[10px] font-normal text-muted">Signals</span>
+                        </CheckRow>
 
                         {/* Binance Stream */}
-                        <div className="p-4 rounded-xl bg-white/5 border border-white/10 space-y-4">
-                            <div className="flex justify-between items-center">
-                                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Ticker Streams</span>
-                                <StatusBadge state={Object.keys(marketData).length > 0 ? 'online' : 'checking'} />
-                            </div>
-                            <div className="flex items-center justify-between">
-                                <div className="text-2xl font-mono font-bold text-gray-200">{Object.keys(marketData).length + Object.keys(futuresData).length} <span className="text-xs text-gray-600 font-sans">Pairs</span></div>
-                                <Zap size={24} className="text-cyan-500 opacity-30" />
-                            </div>
-                            <div className="text-[10px] text-gray-500">Binance WS (Spot + Futures)</div>
-                        </div>
+                        <CheckRow
+                            state={Object.keys(marketData).length > 0 ? 'online' : 'checking'}
+                            label="Ticker Streams"
+                            detail="Binance WS (Spot + Futures)"
+                        >
+                            {Object.keys(marketData).length + Object.keys(futuresData).length} <span className="font-sans text-[10px] font-normal text-muted">Pairs</span>
+                        </CheckRow>
 
                         {/* Webview / App Internal */}
-                        <div className="p-4 rounded-xl bg-white/5 border border-white/10 space-y-4">
-                            <div className="flex justify-between items-center">
-                                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">App Memory</span>
-                                <StatusBadge state="online" />
-                            </div>
-                            <div className="flex items-center justify-between">
-                                <div className="text-2xl font-mono font-bold text-gray-200">OK</div>
-                                <Activity size={24} className="text-emerald-500 opacity-30" />
-                            </div>
-                            <div className="text-[10px] text-gray-500">React Root Lifecycle</div>
-                        </div>
+                        <CheckRow
+                            state="online"
+                            label="App Memory"
+                            detail="React Root Lifecycle"
+                        >
+                            OK
+                        </CheckRow>
                     </div>
-                </GlassCard>
+                </section>
 
-                <GlassCard className="p-6">
-                    <div className="flex items-center gap-3 mb-6">
-                        <FlaskConical className="text-amber-400" />
-                        <div>
-                            <h3 className="font-bold text-gray-200">Active Test Laboratory</h3>
-                            <p className="text-xs text-gray-500">Manually trigger system functions and verify logic</p>
+                <section className="flex flex-1 flex-col bg-surface lg:min-h-0">
+                    <header className={PANEL_HEADER_CLASS}>
+                        <div className="flex min-w-0 items-baseline gap-2">
+                            <h3 className={PANEL_TITLE_CLASS}>
+                                <FlaskConical size={12} className="self-center" />
+                                Active Test Laboratory
+                            </h3>
+                            <p className="hidden truncate text-[11px] text-muted md:block">Manually trigger system functions and verify logic</p>
                         </div>
-                    </div>
+                    </header>
 
-                    <div className="space-y-4">
-                        <div className="flex items-center justify-between p-4 rounded-lg bg-black/20 border border-white/5">
-                            <div>
-                                <h4 className="text-sm font-bold text-gray-200">Webhook Simulation</h4>
-                                <p className="text-[10px] text-gray-500">Post a test signal to /api/webhook</p>
+                    <div className="lg:min-h-0 lg:flex-1 lg:overflow-auto">
+                        <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2 last:border-b-0 lg:last:border-b">
+                            <div className="min-w-0">
+                                <h4 className="text-xs font-medium text-text">Webhook Koruma Testi</h4>
+                                <p className="text-[11px] text-secondary">Geçersiz anahtarla /api/webhook'a istek gönderir; 401 beklenir, kayıt oluşturulmaz</p>
                             </div>
                             <button
                                 onClick={runWebhookTest}
                                 disabled={isTesting}
-                                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-2"
+                                className={DEFAULT_BUTTON_CLASS}
                             >
                                 <Share2 size={14} />
-                                Trigger Webhook
+                                Webhook'u Doğrula
                             </button>
                         </div>
 
-                        <div className="flex items-center justify-between p-4 rounded-lg bg-black/20 border border-white/5">
-                            <div>
-                                <h4 className="text-sm font-bold text-gray-200">AI Logic Test</h4>
-                                <p className="text-[10px] text-gray-500">Verify Gemini Pro API & Analysis endpoint</p>
+                        <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2 last:border-b-0 lg:last:border-b">
+                            <div className="min-w-0">
+                                <h4 className="text-xs font-medium text-text">AI Logic Test</h4>
+                                <p className="text-[11px] text-secondary">Verify Gemini Pro API & Analysis endpoint</p>
                             </div>
                             <button
                                 onClick={runAiTest}
                                 disabled={isTesting}
-                                className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-2"
+                                className={DEFAULT_BUTTON_CLASS}
                             >
                                 <Brain size={14} />
                                 Test AI Analyzer
                             </button>
                         </div>
                     </div>
-                </GlassCard>
+                </section>
             </div>
 
             {/* Side Console */}
-            <div className="space-y-6">
-                <GlassCard className="p-6 h-full flex flex-col">
-                    <div className="flex items-center gap-3 mb-4">
-                        <Lock className="text-gray-500" />
-                        <h3 className="font-bold text-gray-200">Diagnostic Logs</h3>
-                    </div>
+            <section className="flex min-w-0 flex-col bg-surface lg:min-h-0">
+                <header className={PANEL_HEADER_CLASS}>
+                    <h3 className={PANEL_TITLE_CLASS}>
+                        <Lock size={12} />
+                        Diagnostic Logs
+                    </h3>
+                </header>
 
-                    <div className="flex-1 overflow-auto bg-black/40 rounded-lg p-4 font-mono text-[10px] text-gray-400 space-y-2 min-h-[400px]">
-                        <div className="text-emerald-500/70">[SYSTEM] Initialization complete.</div>
-                        <div className="text-gray-600">[{new Date().toLocaleTimeString()}] Diagnostics service started.</div>
-                        <div className="text-gray-600">[{new Date().toLocaleTimeString()}] Checking endpoint availability...</div>
-                        {serverStatus === 'online' && <div className="text-emerald-500/70">[{new Date().toLocaleTimeString()}] OK: {API_BASE_URL}/health</div>}
-                        {dbCount !== null && <div className="text-emerald-500/70">[{new Date().toLocaleTimeString()}] OK: Database connection verified. {dbCount} records found.</div>}
+                {/* Console output fills the panel edge to edge (no framed box inside the panel) */}
+                <div className="min-h-[200px] flex-1 space-y-1 overflow-auto px-3 py-2 font-mono text-[11px] text-secondary lg:min-h-0">
+                    <div className="text-success">[SYSTEM] Initialization complete.</div>
+                    <div className="text-muted">[{new Date().toLocaleTimeString()}] Diagnostics service started.</div>
+                    <div className="text-muted">[{new Date().toLocaleTimeString()}] Checking endpoint availability...</div>
+                    {serverStatus === 'online' && <div className="text-success">[{new Date().toLocaleTimeString()}] OK: {API_BASE_URL}/health</div>}
+                    {dbCount !== null && <div className="text-success">[{new Date().toLocaleTimeString()}] OK: Database connection verified. {dbCount} records found.</div>}
 
-                        {lastTestResult && (
-                            <div className="mt-4 border-t border-white/10 pt-4">
-                                <div className="text-gray-300 font-bold mb-1">LAST TEST RESULT:</div>
-                                <div className="text-amber-400 bg-amber-400/5 p-2 rounded">{lastTestResult}</div>
-                            </div>
-                        )}
-
-                        {!lastTestResult && (
-                            <div className="text-gray-700 italic mt-8 text-center">
-                                Run a test to see results here
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="mt-4 p-4 rounded-lg bg-white/5 border border-white/10">
-                        <div className="flex items-center gap-2 mb-2">
-                            <Globe size={14} className="text-blue-400" />
-                            <span className="text-xs font-bold text-gray-300">External Interfaces</span>
+                    {lastTestResult && (
+                        <div className="mt-2 border-t border-border pt-2">
+                            <div className="mb-1 font-semibold text-text">LAST TEST RESULT:</div>
+                            <div className="break-words text-warning">{lastTestResult}</div>
                         </div>
-                        <div className="text-[10px] space-y-1">
-                            <div className="flex justify-between">
-                                <span className="text-gray-500">Binance WebSocket:</span>
-                                <span className="text-emerald-400 font-mono">CONNECTED</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span className="text-gray-500">TradingView Proxy:</span>
-                                <span className="text-emerald-400 font-mono">ACTIVE</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span className="text-gray-500">Gemini AI API:</span>
-                                <span className="text-amber-400 font-mono">PENDING_KEY_VAL</span>
-                            </div>
+                    )}
+
+                    {!lastTestResult && (
+                        <div className="pt-4 text-center font-sans text-xs text-muted">
+                            Run a test to see results here
+                        </div>
+                    )}
+                </div>
+
+                <div className="shrink-0 border-t border-border">
+                    <header className={PANEL_HEADER_CLASS}>
+                        <h3 className={PANEL_TITLE_CLASS}>
+                            <Globe size={12} />
+                            External Interfaces
+                        </h3>
+                    </header>
+                    <div className="text-xs">
+                        <div className="flex h-7 items-center justify-between border-b border-border px-3">
+                            <span className="text-secondary">Binance WebSocket:</span>
+                            <span className="font-mono text-[11px] text-success">CONNECTED</span>
+                        </div>
+                        <div className="flex h-7 items-center justify-between border-b border-border px-3">
+                            <span className="text-secondary">TradingView Proxy:</span>
+                            <span className="font-mono text-[11px] text-success">ACTIVE</span>
+                        </div>
+                        <div className="flex h-7 items-center justify-between px-3">
+                            <span className="text-secondary">Gemini AI API:</span>
+                            <span className="font-mono text-[11px] text-warning">PENDING_KEY_VAL</span>
                         </div>
                     </div>
-                </GlassCard>
-            </div>
+                </div>
+            </section>
         </div>
     );
 };
