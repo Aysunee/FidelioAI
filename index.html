@@ -3,6 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- Binance's WAF answers 403 to any request whose Referer is a punycode (IDN) domain such as
+         xn--fdelo-n4ad.com (anti-homograph rule). Never send our URL to other origins. -->
+    <meta name="referrer" content="same-origin" />
     <link rel="preconnect" href="https://fapi.binance.com" crossorigin>
     <link rel="dns-prefetch" href="https://fstream.binance.com">
     <link rel="dns-prefetch" href="https://api.binance.com">

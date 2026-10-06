@@ -106,6 +106,8 @@ app.use(cors({
 
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    // Cross-origin requests (Binance REST) must not carry our punycode domain as Referer: Binance's WAF rejects them with 403.
+    res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     next();
 });
