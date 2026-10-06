@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { motion } from 'framer-motion';
-import { Lock, ArrowRight, AlertCircle, User } from 'lucide-react';
+import { Lock, ArrowRight, AlertCircle, Info, User } from 'lucide-react';
 import { useUser } from '../context/UserContext';
+import { apiUrl } from '../utils/config';
 
 export const Login: React.FC = () => {
-    const { login } = useUser();
+    const { login, sessionNotice } = useUser();
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
@@ -13,139 +13,146 @@ export const Login: React.FC = () => {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (loading) return;
         setError('');
-        setLoading(true);
 
+        if (!username.trim() || !password) {
+            setError('Kullanıcı adı ve şifre gereklidir.');
+            setShake(prev => prev + 1);
+            return;
+        }
+
+        setLoading(true);
         try {
-            const result = await login(username, password);
-            if (result.success) {
-                // Success is handled by context state change redirecting in App.tsx
-            } else {
-                setError(result.error || 'Invalid username or password');
+            const result = await login(username.trim(), password);
+            if (!result.success) {
+                // Success is handled by the context state change (App.tsx renders the dashboard).
+                setError(result.error || 'Kullanıcı adı veya şifre hatalı.');
                 setShake(prev => prev + 1);
             }
-        } catch (err) {
-            setError('An unexpected error occurred');
+        } catch {
+            setError('Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.');
         } finally {
             setLoading(false);
         }
     };
 
-    // Diagnostic State
-    const [diagStatus, setDiagStatus] = useState<{ status: string; url: string }>({ status: 'Checking...', url: '' });
+    // Connection status is a development aid only: it is never shown in production builds
+    // and never reveals the backend address.
+    const showDiagnostics = import.meta.env.DEV;
+    const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'error'>('checking');
 
     React.useEffect(() => {
-        const checkHealth = async () => {
-            // Dynamically import to ensure we get the client-side resolved URL
-            const { API_BASE_URL } = await import('../utils/config');
-            const healthUrl = `${API_BASE_URL}/health`;
-            setDiagStatus(prev => ({ ...prev, url: API_BASE_URL }));
+        if (!showDiagnostics) return;
+        let cancelled = false;
+        fetch(apiUrl('/health'))
+            .then(res => { if (!cancelled) setBackendStatus(res.ok ? 'ok' : 'error'); })
+            .catch(() => { if (!cancelled) setBackendStatus('error'); });
+        return () => { cancelled = true; };
+    }, [showDiagnostics]);
 
-            try {
-                const res = await fetch(healthUrl);
-                if (res.ok) {
-                    setDiagStatus({ status: 'Connected ✅', url: API_BASE_URL });
-                } else {
-                    setDiagStatus({ status: `Error ${res.status} ❌`, url: API_BASE_URL });
-                }
-            } catch (e: any) {
-                setDiagStatus({ status: `Unreachable (${e.message}) ❌`, url: API_BASE_URL });
-            }
-        };
-        checkHealth();
-    }, []);
+    const inputClass = (hasError: boolean) =>
+        `h-8 w-full rounded-sm border bg-surface-secondary pl-8 pr-2 text-xs text-text outline-none transition-colors placeholder:text-muted focus:border-primary disabled:opacity-60 ${hasError ? 'border-danger' : 'border-border'}`;
 
     return (
-        <div className="min-h-screen flex items-center justify-center bg-black relative overflow-hidden">
-            {/* Ambient Background */}
-            <div className="absolute inset-0 overflow-hidden pointer-events-none">
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-purple-900/20 rounded-full blur-[120px] animate-pulse"></div>
-            </div>
-
-            <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.5 }}
-                className="relative z-10 w-full max-w-md p-8"
-            >
-                <div className="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-8 shadow-2xl shadow-purple-900/20">
-                    <div className="text-center mb-8">
-                        <div className="w-16 h-16 mx-auto bg-gradient-to-br from-purple-600 to-amber-600 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-purple-500/30">
-                            <Lock className="text-white" size={32} />
-                        </div>
-                        <h1 className="text-3xl font-bold bg-gradient-to-r from-purple-400 to-amber-400 bg-clip-text text-transparent mb-2">
-                            Fidelio
-                        </h1>
-                        <p className="text-gray-400 text-sm">Restricted Access</p>
-                    </div>
-
-                    <form onSubmit={handleSubmit} className="space-y-4">
-                        <motion.div
-                            animate={{ x: error ? [0, -10, 10, -10, 10, 0] : 0 }}
-                            key={shake}
-                            transition={{ duration: 0.4 }}
-                            className="space-y-4"
-                        >
-                            <div className="relative">
-                                <User className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                                <input
-                                    type="text"
-                                    value={username}
-                                    onChange={(e) => {
-                                        setUsername(e.target.value);
-                                        setError('');
-                                    }}
-                                    placeholder="Username"
-                                    className={`w-full bg-black/40 border ${error ? 'border-red-500/50' : 'border-white/10'} rounded-xl pl-12 pr-4 py-3 text-white outline-none focus:border-purple-500/50 transition-all placeholder:text-gray-600`}
-                                    autoFocus
-                                    disabled={loading}
-                                />
-                            </div>
-                            <div className="relative">
-                                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                                <input
-                                    type="password"
-                                    value={password}
-                                    onChange={(e) => {
-                                        setPassword(e.target.value);
-                                        setError('');
-                                    }}
-                                    placeholder="Password"
-                                    className={`w-full bg-black/40 border ${error ? 'border-red-500/50' : 'border-white/10'} rounded-xl pl-12 pr-4 py-3 text-white outline-none focus:border-purple-500/50 transition-all placeholder:text-gray-600`}
-                                    disabled={loading}
-                                />
-                            </div>
-                        </motion.div>
-
-                        {error && (
-                            <div className="flex items-center justify-center gap-2 text-red-400 text-xs text-center px-4">
-                                <AlertCircle size={12} className="shrink-0" />
-                                <span>{error}</span>
-                            </div>
-                        )}
-
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="w-full bg-white text-black font-bold py-3 rounded-xl hover:bg-gray-200 transition-colors flex items-center justify-center gap-2 group disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            <span>{loading ? 'Authenticating...' : 'Enter System'}</span>
-                            {!loading && <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />}
-                        </button>
-                    </form>
-
-                    {/* Connection Diagnostics */}
-                    <div className="mt-8 pt-4 border-t border-white/5 text-center">
-                        <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">System Status</p>
-                        <div className={`text-xs font-mono font-medium ${diagStatus.status.includes('Connected') ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            Backend: {diagStatus.status}
-                        </div>
-                        <div className="text-[9px] text-gray-600 mt-1 font-mono break-all">
-                            Target: {diagStatus.url}
-                        </div>
-                    </div>
+        // A centred 320px flat panel on the app background (tokens follow the saved theme).
+        <div className="flex min-h-dvh items-center justify-center bg-background p-4 text-text">
+            <div className="w-full max-w-[320px] border border-border bg-surface">
+                <div className="flex h-10 items-center justify-between gap-2 border-b border-border px-3">
+                    <h1 className="text-gradient-violet text-sm font-bold uppercase tracking-wide">
+                        Fidelio
+                    </h1>
+                    <p lang="tr" className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted">
+                        <Lock size={12} aria-hidden="true" />
+                        Yetkili Erişim
+                    </p>
                 </div>
-            </motion.div>
+
+                {/* Why the previous session ended (e.g. own password changed); cleared on the next successful login */}
+                {sessionNotice && (
+                    <div role="status" className="flex items-start gap-2 border-b border-border bg-warning-soft px-3 py-2 text-[11px] leading-snug text-warning">
+                        <Info size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
+                        <span>{sessionNotice}</span>
+                    </div>
+                )}
+
+                <form onSubmit={handleSubmit} className="space-y-2 p-3" noValidate>
+                    {/* Re-keyed on every failed attempt so the username field takes the focus again. */}
+                    <div key={shake} className="space-y-2">
+                        <div className="relative">
+                            <label htmlFor="login-username" className="sr-only">Kullanıcı adı</label>
+                            <User className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" size={14} aria-hidden="true" />
+                            <input
+                                id="login-username"
+                                name="username"
+                                type="text"
+                                autoComplete="username"
+                                autoCapitalize="none"
+                                autoCorrect="off"
+                                spellCheck={false}
+                                aria-invalid={!!error}
+                                aria-describedby={error ? 'login-error' : undefined}
+                                value={username}
+                                onChange={(e) => {
+                                    setUsername(e.target.value);
+                                    setError('');
+                                }}
+                                placeholder="Kullanıcı adı"
+                                className={inputClass(!!error)}
+                                autoFocus
+                                disabled={loading}
+                            />
+                        </div>
+                        <div className="relative">
+                            <label htmlFor="login-password" className="sr-only">Şifre</label>
+                            <Lock className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" size={14} aria-hidden="true" />
+                            <input
+                                id="login-password"
+                                name="password"
+                                type="password"
+                                autoComplete="current-password"
+                                aria-invalid={!!error}
+                                aria-describedby={error ? 'login-error' : undefined}
+                                value={password}
+                                onChange={(e) => {
+                                    setPassword(e.target.value);
+                                    setError('');
+                                }}
+                                placeholder="Şifre"
+                                className={inputClass(!!error)}
+                                disabled={loading}
+                            />
+                        </div>
+                    </div>
+
+                    {error && (
+                        <div id="login-error" role="alert" className="flex items-start gap-1.5 text-[11px] leading-snug text-danger">
+                            <AlertCircle size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
+                            <span>{error}</span>
+                        </div>
+                    )}
+
+                    <button
+                        type="submit"
+                        disabled={loading}
+                        className="flex h-8 w-full items-center justify-center gap-1.5 rounded-sm bg-primary text-xs font-medium text-primary-contrast transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-primary"
+                    >
+                        <span>{loading ? 'Giriş yapılıyor…' : 'Sisteme Giriş Yap'}</span>
+                        {!loading && <ArrowRight size={14} />}
+                    </button>
+                </form>
+
+                {/* Connection status (development builds only) */}
+                {showDiagnostics && (
+                    <div className="flex h-7 items-center justify-between gap-2 border-t border-border px-3 text-[10px]">
+                        <p lang="tr" className="uppercase tracking-wider text-muted">Sistem Durumu (geliştirme)</p>
+                        <div className={`flex items-center gap-1.5 font-mono ${backendStatus === 'ok' ? 'text-success' : backendStatus === 'error' ? 'text-danger' : 'text-secondary'}`}>
+                            <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+                            Sunucu: {backendStatus === 'ok' ? 'Bağlı' : backendStatus === 'error' ? 'Bağlanılamadı' : 'Kontrol ediliyor…'}
+                        </div>
+                    </div>
+                )}
+            </div>
         </div>
     );
 };

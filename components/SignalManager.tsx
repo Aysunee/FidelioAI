@@ -1,11 +1,148 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { Signal, Side } from '../types';
-import { Card } from './ui/Card';
-import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings } from 'lucide-react';
+import { Signal } from '../types';
+import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings, Percent, Activity } from 'lucide-react';
 import { useSignals } from '../context/SignalContext';
 import { Modal } from './ui/Modal';
 import { formatPrice } from '../utils/formatters';
+import { SIGNAL_SETTINGS_LIMITS } from '../utils/signalEngines';
+import { FUNDING_THRESHOLDS } from '../utils/fundingSqueeze';
+import { getSideBadge, getSideKind, getSignalLabel, getMagnitude, SideKind } from './SignalFeed';
+
+// Quote every CSV cell, escape embedded quotes and neutralise spreadsheet formulas
+// (webhook-supplied strategy/note values may start with = + - @). A plain signed number such as
+// "+9.1%" or "-0.0712%" is not a formula and is written as it is.
+const toCsvCell = (value: unknown): string => {
+    let text = value === null || value === undefined ? '' : String(value);
+    if (typeof value !== 'number' && /^[=+\-@\t\r]/.test(text) && !/^[+-]\d+(?:[.,]\d+)?[%x]?$/.test(text)) {
+        text = `'${text}`;
+    }
+    return `"${text.replace(/"/g, '""')}"`;
+};
+
+type SignalsApi = ReturnType<typeof useSignals>;
+type SignalSettings = SignalsApi['signalSettings'];
+type EngineCount = SignalsApi['engineStats']['momentum'];
+
+type SettingsField = 'momThreshold' | 'momCooldown' | 'volRatio' | 'volCooldown' | 'fundingThreshold' | 'fundingCooldown';
+type SettingsDraft = Record<SettingsField, string>;
+
+const toDraft = (settings: SignalSettings): SettingsDraft => ({
+    momThreshold: String(settings?.momentum?.threshold ?? ''),
+    momCooldown: String(settings?.momentum?.cooldownHours ?? ''),
+    volRatio: String(settings?.volume?.ratio ?? ''),
+    volCooldown: String(settings?.volume?.cooldownHours ?? ''),
+    fundingThreshold: String(settings?.funding?.thresholdPct ?? ''),
+    fundingCooldown: String(settings?.funding?.cooldownHours ?? '')
+});
+
+// Accepts both "3.5" and "3,5" and the typographic minus; returns null for empty / non-numeric input (never NaN).
+const parseDecimal = (raw: string): number | null => {
+    const normalized = raw.trim().replace(',', '.').replace('\u2212', '-');
+    if (normalized === '') return null;
+    const value = Number(normalized);
+    return Number.isFinite(value) ? value : null;
+};
+
+// Bounds and defaults come from the engine module, so the form can never accept a value the engine
+// would clamp. Funding is an 8h-equivalent percent and must be negative.
+const LIMITS = SIGNAL_SETTINGS_LIMITS;
+
+const SETTING_RULES: Record<SettingsField, { min: number; max: number; default: number; message: string }> = {
+    momThreshold: { ...LIMITS.momentum.threshold, message: `Eşik %${LIMITS.momentum.threshold.min} ile %${LIMITS.momentum.threshold.max} arasında olmalı.` },
+    momCooldown: { ...LIMITS.momentum.cooldownHours, message: `Bekleme ${LIMITS.momentum.cooldownHours.min} ile ${LIMITS.momentum.cooldownHours.max} saat arasında olmalı.` },
+    volRatio: { ...LIMITS.volume.ratio, message: `Oran ${LIMITS.volume.ratio.min} ile ${LIMITS.volume.ratio.max} kat arasında olmalı.` },
+    volCooldown: { ...LIMITS.volume.cooldownHours, message: `Bekleme ${LIMITS.volume.cooldownHours.min} ile ${LIMITS.volume.cooldownHours.max} saat arasında olmalı.` },
+    fundingThreshold: { ...LIMITS.funding.thresholdPct, message: `Eşik negatif olmalı: ${LIMITS.funding.thresholdPct.min} ile ${LIMITS.funding.thresholdPct.max} arasında (%).` },
+    fundingCooldown: { ...LIMITS.funding.cooldownHours, message: `Bekleme ${LIMITS.funding.cooldownHours.min} ile ${LIMITS.funding.cooldownHours.max} saat arasında olmalı.` }
+};
+
+const rangeHint = (field: SettingsField): string => {
+    const rule = SETTING_RULES[field];
+    return `Varsayılan ${rule.default} · en az ${rule.min} · en çok ${rule.max}`;
+};
+
+// The detector never uses a negative gate looser than this fixed level (utils/fundingSqueeze.ts),
+// so a threshold above it behaves like it.
+const FUNDING_FLOOR_PCT = Number((-FUNDING_THRESHOLDS.extremeF8 * 100).toFixed(4));
+const FUNDING_FLOOR_TEXT = `${FUNDING_FLOOR_PCT < 0 ? '−' : ''}%${Math.abs(FUNDING_FLOOR_PCT)}`;
+
+const SETTING_FIELDS = Object.keys(SETTING_RULES) as SettingsField[];
+
+const validateField = (field: SettingsField, raw: string): { value: number | null; error: string | null } => {
+    const rule = SETTING_RULES[field];
+    const value = parseDecimal(raw);
+    if (value === null) return { value: null, error: 'Bir sayı girin.' };
+    if (value < rule.min || value > rule.max) return { value: null, error: rule.message };
+    return { value, error: null };
+};
+
+const INPUT_CLASS = 'h-7 rounded-sm border border-border bg-surface-secondary px-2 text-xs text-text placeholder:text-muted outline-none focus:border-primary';
+const LABEL_CLASS = 'mb-1 block text-[11px] text-secondary';
+const HINT_CLASS = 'mt-1 text-[10px] leading-snug text-muted';
+const SECTION_TITLE_CLASS = 'flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-secondary';
+const RULE_TEXT_CLASS = 'text-[11px] leading-snug text-secondary';
+const ICON_BUTTON_CLASS = 'grid h-6 w-6 place-items-center rounded-sm text-secondary transition-colors hover:bg-surface-secondary hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
+const TH_CLASS = 'sticky top-0 z-10 h-7 whitespace-nowrap border-b border-border bg-surface px-3 text-[10px] font-medium uppercase tracking-wider text-muted';
+const TD_CLASS = 'h-7 whitespace-nowrap border-b border-border px-3';
+
+// One numeric setting: label, input with its unit, allowed range and the inline validation message.
+const SettingInput: React.FC<{
+    id: string;
+    label: string;
+    unit: string;
+    step: string;
+    hint: string;
+    value: string;
+    error: string | null;
+    onChange: (value: string) => void;
+    children?: React.ReactNode;
+}> = ({ id, label, unit, step, hint, value, error, onChange, children }) => (
+    <div className="min-w-0">
+        <label htmlFor={id} className={LABEL_CLASS}>{label}</label>
+        <div className={`flex h-7 items-center rounded-sm border bg-surface-secondary focus-within:border-primary ${error ? 'border-danger' : 'border-border'}`}>
+            <input
+                id={id}
+                type="number"
+                inputMode="decimal"
+                step={step}
+                value={value}
+                onChange={e => onChange(e.target.value)}
+                aria-invalid={error ? true : undefined}
+                aria-describedby={`${id}-hint`}
+                className="h-full w-full min-w-0 bg-transparent px-2 font-mono text-xs text-text outline-none"
+            />
+            <span className="shrink-0 pr-2 text-[11px] text-muted">{unit}</span>
+        </div>
+        {error ? (
+            <p id={`${id}-hint`} role="alert" className="mt-1 flex items-start gap-1 text-[10px] leading-snug text-danger">
+                <AlertCircle size={10} className="mt-px shrink-0" />
+                <span>{error}</span>
+            </p>
+        ) : (
+            <p id={`${id}-hint`} className={HINT_CLASS}>{hint}</p>
+        )}
+        {children}
+    </div>
+);
+
+// "şu an N / M coin eşiğin ötesinde": how many symbols satisfy the SAVED threshold right now.
+// The engine refreshes these counts every few seconds; while a count is not available the line says so.
+const LiveCount: React.FC<{ stat: EngineCount | undefined; savedLabel: string; isDraftChanged: boolean }> = ({ stat, savedLabel, isDraftChanged }) => {
+    const ready = !!stat && Number.isFinite(stat.matching) && Number.isFinite(stat.universe) && stat.universe > 0;
+    return (
+        <p className="mt-1 text-[10px] leading-snug text-muted" aria-live="polite">
+            {ready ? (
+                <>
+                    şu an <span className="font-mono text-[11px] font-semibold text-text">{stat!.matching} / {stat!.universe}</span> coin eşiğin ötesinde
+                    {isDraftChanged && <> (kayıtlı eşik {savedLabel} için)</>}
+                </>
+            ) : (
+                'canlı sayaç: veri bekleniyor'
+            )}
+        </p>
+    );
+};
 
 interface SignalManagerProps {
     signals: Signal[];
@@ -14,23 +151,46 @@ interface SignalManagerProps {
 }
 
 export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete, onClearAll }) => {
-    const { signalSettings, updateSignalSettings } = useSignals();
+    const { signalSettings, updateSignalSettings, engineStats } = useSignals();
     const [searchTerm, setSearchTerm] = useState('');
-    const [sideFilter, setSideFilter] = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
+    const [sideFilter, setSideFilter] = useState<'ALL' | SideKind>('ALL');
     const [strategyFilter, setStrategyFilter] = useState<string>('ALL');
 
-    // Settings Modal State
+    // Settings Modal State (inputs are kept as raw strings and validated while typing)
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const [localSettings, setLocalSettings] = useState(signalSettings);
+    const [draft, setDraft] = useState<SettingsDraft>(() => toDraft(signalSettings));
 
     useEffect(() => {
-        if (isSettingsOpen) setLocalSettings(signalSettings);
+        if (isSettingsOpen) setDraft(toDraft(signalSettings));
     }, [isSettingsOpen, signalSettings]);
 
+    const updateDraft = (field: SettingsField, value: string) => {
+        setDraft(prev => ({ ...prev, [field]: value }));
+    };
+
+    const checked = useMemo(() => {
+        const result = {} as Record<SettingsField, { value: number | null; error: string | null }>;
+        SETTING_FIELDS.forEach(field => { result[field] = validateField(field, draft[field]); });
+        return result;
+    }, [draft]);
+    const hasSettingsError = SETTING_FIELDS.some(field => checked[field].error !== null);
+
     const handleSaveSettings = () => {
-        updateSignalSettings(localSettings);
+        if (hasSettingsError) return;
+        updateSignalSettings({
+            version: 2,
+            momentum: { threshold: checked.momThreshold.value!, cooldownHours: checked.momCooldown.value! },
+            volume: { ratio: checked.volRatio.value!, cooldownHours: checked.volCooldown.value! },
+            funding: { thresholdPct: checked.fundingThreshold.value!, cooldownHours: checked.fundingCooldown.value! }
+        });
         setIsSettingsOpen(false);
     };
+
+    // The live counters describe the saved thresholds; say so while the draft differs from them.
+    const savedMomentum = signalSettings?.momentum?.threshold;
+    const savedVolume = signalSettings?.volume?.ratio;
+    const savedFunding = signalSettings?.funding?.thresholdPct;
+    const draftDiffers = (field: SettingsField, saved: number | undefined) => parseDecimal(draft[field]) !== (saved ?? null);
 
     // Extract unique strategies for the filter dropdown
     const uniqueStrategies = useMemo(() => {
@@ -39,13 +199,12 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
     }, [signals]);
 
     const filteredSignals = useMemo(() => {
+        const term = searchTerm.toLowerCase();
         return signals.filter(sig => {
-            const matchesSearch = sig.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                sig.note?.toLowerCase().includes(searchTerm.toLowerCase());
+            const matchesSearch = sig.symbol.toLowerCase().includes(term) ||
+                sig.note?.toLowerCase().includes(term);
 
-            const matchesSide = sideFilter === 'ALL'
-                ? true
-                : (sideFilter === 'LONG' ? (sig.side === 'BUY' || sig.side === 'LONG') : (sig.side === 'SELL' || sig.side === 'SHORT'));
+            const matchesSide = sideFilter === 'ALL' ? true : getSideKind(sig.side) === sideFilter;
 
             const matchesStrategy = strategyFilter === 'ALL' ? true : sig.strategy === strategyFilter;
 
@@ -54,285 +213,352 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
     }, [signals, searchTerm, sideFilter, strategyFilter]);
 
     const formatTime = (isoStr: string) => {
-        return new Date(isoStr).toLocaleString(undefined, {
+        return new Date(isoStr).toLocaleString('tr-TR', {
             month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
         });
     };
 
     const exportCSV = () => {
-        const headers = ['Time', 'Symbol', 'Side', 'Price', 'Strategy', 'Note'];
-        const rows = filteredSignals.map(s => [
-            s.time, s.symbol, s.side, s.price, s.strategy, s.note || ''
-        ]);
-        const csvContent = "data:text/csv;charset=utf-8,"
-            + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
-        const encodedUri = encodeURI(csvContent);
-        const link = document.createElement("a");
-        link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `signals_export_${Date.now()}.csv`);
+        if (typeof document === 'undefined' || typeof window === 'undefined') return;
+        const headers = ['Zaman', 'Sembol', 'Yön', 'Büyüklük', 'Büyüklük açıklaması', 'Fiyat', 'Kural', 'Strateji anahtarı', 'Not'];
+        const rows = filteredSignals.map(s => {
+            const magnitude = getMagnitude(s);
+            return [
+                s.time, s.symbol, getSideBadge(s).text, magnitude?.text ?? '', magnitude?.caption ?? '',
+                s.price, getSignalLabel(s.strategy), s.strategy, s.note || ''
+            ];
+        });
+        const csvContent = [headers, ...rows].map(row => row.map(toCsvCell).join(',')).join('\r\n');
+        // UTF-8 BOM so Excel detects the encoding (Turkish characters)
+        const blob = new Blob(['﻿' + csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `signals_export_${Date.now()}.csv`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        // Safari/iOS start the download asynchronously; revoking too early aborts it.
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
     };
 
     return (
-        <Card className="h-full flex flex-col" noPadding>
+        <section lang="tr" className="flex h-full min-h-0 w-full flex-1 flex-col bg-surface">
             {/* Settings Modal */}
-            <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Signal Parameters">
-                <div className="space-y-6">
-                    {/* Volume Settings */}
-                    <div className="space-y-3">
-                        <h3 className="text-sm font-bold text-brand uppercase tracking-wider flex items-center gap-2">
-                            <Zap size={14} /> Volume Spike Detection
+            <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Sinyal kuralları" maxWidth="max-w-xl">
+                <div className="space-y-3">
+                    <p className={RULE_TEXT_CLASS}>
+                        Üç kural bu tarayıcıda, Binance'in herkese açık verisiyle çalışır. Kayıtlar yalnızca ölçülen durumu bildirir;
+                        tahmin ya da işlem önerisi değildir. Bir eşiği değiştirdiğinizde o kural sessizce yeniden başlar:
+                        o an eşiğin ötesinde olan coinler için toplu kayıt açılmaz.
+                    </p>
+
+                    {/* Momentum */}
+                    <div className="space-y-2 border-t border-border pt-3">
+                        <h3 className={SECTION_TITLE_CLASS}>
+                            <Percent size={12} /> 24 saatlik momentum
                         </h3>
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-1">
-                                <label className="text-xs text-secondary">Spike Threshold (x)</label>
-                                <input
-                                    type="number"
-                                    step="0.1"
-                                    value={localSettings.volume.threshold}
-                                    onChange={e => setLocalSettings({ ...localSettings, volume: { ...localSettings.volume, threshold: parseFloat(e.target.value) } })}
-                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                        <p className={RULE_TEXT_CLASS}>
+                            Spot USDT paritesinin 24 saatlik değişimi eşiğe ulaşmış (yukarı ya da aşağı) ve fiyat yeni 24 saatlik zirvede
+                            (yükselişte) ya da dipte (düşüşte), yani o uca en çok %0.1 uzaklıkta ise kayıt açılır. Kayıt, iki koşulun
+                            birlikte sağlandığı ana girişte bir kez açılır. Yön, hareketin yönüdür. Evren: 24 saatlik hacmi en az
+                            1 milyon USDT olan pariteler; stabil ve wrapped coinler ile 24 saatlik aralığı %0.3'ten dar olanlar hariç.
+                            Bir taramada en çok 5 kayıt açılır (en büyük değişim önce).
+                        </p>
+                        <div className="grid grid-cols-2 gap-3">
+                            <SettingInput
+                                id="signal-mom-threshold"
+                                label="24s değişim eşiği"
+                                unit="%"
+                                step="0.5"
+                                hint={rangeHint('momThreshold')}
+                                value={draft.momThreshold}
+                                error={checked.momThreshold.error}
+                                onChange={v => updateDraft('momThreshold', v)}
+                            >
+                                <LiveCount
+                                    stat={engineStats?.momentum}
+                                    savedLabel={savedMomentum !== undefined ? `%${savedMomentum}` : ''}
+                                    isDraftChanged={draftDiffers('momThreshold', savedMomentum)}
                                 />
-                                <p className="text-[10px] text-secondary">Multiplier of avg flow (e.g. 3.0x)</p>
-                            </div>
-                            <div className="space-y-1">
-                                <label className="text-xs text-secondary">Cooldown (sec)</label>
-                                <input
-                                    type="number"
-                                    value={localSettings.volume.cooldown}
-                                    onChange={e => setLocalSettings({ ...localSettings, volume: { ...localSettings.volume, cooldown: parseInt(e.target.value) } })}
-                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
-                                />
-                            </div>
+                            </SettingInput>
+                            <SettingInput
+                                id="signal-mom-cooldown"
+                                label="Bekleme (aynı coin ve yön)"
+                                unit="saat"
+                                step="1"
+                                hint={rangeHint('momCooldown')}
+                                value={draft.momCooldown}
+                                error={checked.momCooldown.error}
+                                onChange={v => updateDraft('momCooldown', v)}
+                            />
                         </div>
                     </div>
 
-                    {/* Momentum Settings */}
-                    <div className="space-y-3 pt-4 border-t border-border">
-                        <h3 className="text-sm font-bold text-brand uppercase tracking-wider flex items-center gap-2">
-                            <ArrowUpRight size={14} /> Momentum (RMI)
+                    {/* Volume */}
+                    <div className="space-y-2 border-t border-border pt-3">
+                        <h3 className={SECTION_TITLE_CLASS}>
+                            <Zap size={12} /> Hacim artışı
                         </h3>
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-1">
-                                <label className="text-xs text-secondary">Price Change (%)</label>
-                                <input
-                                    type="number"
-                                    step="0.1"
-                                    value={localSettings.momentum.threshold}
-                                    onChange={e => setLocalSettings({ ...localSettings, momentum: { ...localSettings.momentum, threshold: parseFloat(e.target.value) } })}
-                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                        <p className={RULE_TEXT_CLASS}>
+                            Oran = son 1 saatin hacmi ÷ (24 saatlik hacim ÷ 24). Oran eşiğin üstüne çıktığı anda bir kez kayıt açılır;
+                            oran 3'ün altına inmeden (eşik 3.6'dan küçükse eşiğin 0.6 katının altına inmeden) aynı coin için kural
+                            yeniden kurulmaz. Yön, son 1 saatlik fiyat değişimi en az %1 ise o değişimin işaretidir; değilse kayıt
+                            yönsüzdür. Evren, momentum kuralıyla aynıdır.
+                        </p>
+                        <div className="grid grid-cols-2 gap-3">
+                            <SettingInput
+                                id="signal-vol-ratio"
+                                label="Oran eşiği"
+                                unit="kat"
+                                step="0.5"
+                                hint={rangeHint('volRatio')}
+                                value={draft.volRatio}
+                                error={checked.volRatio.error}
+                                onChange={v => updateDraft('volRatio', v)}
+                            >
+                                <LiveCount
+                                    stat={engineStats?.volume}
+                                    savedLabel={savedVolume !== undefined ? `${savedVolume} kat` : ''}
+                                    isDraftChanged={draftDiffers('volRatio', savedVolume)}
                                 />
-                                <p className="text-[10px] text-secondary">Trigger threshold (e.g. 4.5%)</p>
-                            </div>
-                            <div className="space-y-1">
-                                <label className="text-xs text-secondary">Cooldown (sec)</label>
-                                <input
-                                    type="number"
-                                    value={localSettings.momentum.cooldown}
-                                    onChange={e => setLocalSettings({ ...localSettings, momentum: { ...localSettings.momentum, cooldown: parseInt(e.target.value) } })}
-                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
-                                />
-                            </div>
+                            </SettingInput>
+                            <SettingInput
+                                id="signal-vol-cooldown"
+                                label="Bekleme (aynı coin)"
+                                unit="saat"
+                                step="1"
+                                hint={rangeHint('volCooldown')}
+                                value={draft.volCooldown}
+                                error={checked.volCooldown.error}
+                                onChange={v => updateDraft('volCooldown', v)}
+                            />
                         </div>
                     </div>
 
-                    {/* Divergence Settings */}
-                    <div className="space-y-3 pt-4 border-t border-border">
-                        <h3 className="text-sm font-bold text-brand uppercase tracking-wider flex items-center gap-2">
-                            <ArrowDownRight size={14} /> Smart Money Div
+                    {/* Funding */}
+                    <div className="space-y-2 border-t border-border pt-3">
+                        <h3 className={SECTION_TITLE_CLASS}>
+                            <Activity size={12} /> Negatif fonlama rejimi
                         </h3>
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-1">
-                                <label className="text-xs text-secondary">Funding Threshold</label>
-                                <input
-                                    type="number"
-                                    step="0.0001"
-                                    value={localSettings.divergence.fundingThreshold}
-                                    onChange={e => setLocalSettings({ ...localSettings, divergence: { ...localSettings.divergence, fundingThreshold: parseFloat(e.target.value) } })}
-                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
+                        <p className={RULE_TEXT_CLASS}>
+                            Kripto perp kontratlarında tahmini fonlama oranı 8 saatlik eşdeğere çevrilir. Sınır, şu üçünden en negatif
+                            olanıdır: girdiğiniz eşik, sabit {FUNDING_FLOOR_TEXT} ve tüm kontratların en negatif %2'lik dilim sınırı. Oran bu
+                            sınırın altına inip en az 60 saniye orada kalırsa ya da işareti pozitiften negatife dönerse kayıt açılır.
+                            Kayıt yönsüzdür. Uygulama açıldığında zaten sınırın altında olan kontratlar için kayıt açılmaz.
+                        </p>
+                        <div className="grid grid-cols-2 gap-3">
+                            <SettingInput
+                                id="signal-funding-threshold"
+                                label="Fonlama eşiği (8s eşdeğeri)"
+                                unit="%"
+                                step="0.01"
+                                hint={`${rangeHint('fundingThreshold')} · ${FUNDING_FLOOR_TEXT}'ten yüksek değerler ${FUNDING_FLOOR_TEXT} gibi çalışır`}
+                                value={draft.fundingThreshold}
+                                error={checked.fundingThreshold.error}
+                                onChange={v => updateDraft('fundingThreshold', v)}
+                            >
+                                <LiveCount
+                                    stat={engineStats?.funding}
+                                    savedLabel={savedFunding !== undefined ? `%${savedFunding}` : ''}
+                                    isDraftChanged={draftDiffers('fundingThreshold', savedFunding)}
                                 />
-                                <p className="text-[10px] text-secondary">Negative funding limit (e.g. -0.0005)</p>
-                            </div>
-                            <div className="space-y-1">
-                                <label className="text-xs text-secondary">Cooldown (sec)</label>
-                                <input
-                                    type="number"
-                                    value={localSettings.divergence.cooldown}
-                                    onChange={e => setLocalSettings({ ...localSettings, divergence: { ...localSettings.divergence, cooldown: parseInt(e.target.value) } })}
-                                    className="w-full bg-surface-secondary border border-border rounded px-3 py-2 text-sm text-text focus:border-brand outline-none"
-                                />
-                            </div>
+                            </SettingInput>
+                            <SettingInput
+                                id="signal-funding-cooldown"
+                                label="Bekleme (aynı coin)"
+                                unit="saat"
+                                step="1"
+                                hint={rangeHint('fundingCooldown')}
+                                value={draft.fundingCooldown}
+                                error={checked.fundingCooldown.error}
+                                onChange={v => updateDraft('fundingCooldown', v)}
+                            />
                         </div>
                     </div>
 
-                    <div className="pt-4 flex justify-end gap-3">
+                    <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
+                        {hasSettingsError && (
+                            <span className="mr-auto text-[11px] text-danger">Kaydetmek için işaretli alanları düzeltin.</span>
+                        )}
                         <button
                             onClick={() => setIsSettingsOpen(false)}
-                            className="px-4 py-2 text-sm font-medium text-secondary hover:text-text transition-colors"
+                            className="h-7 rounded-sm px-2.5 text-xs font-medium text-secondary transition-colors hover:bg-surface-secondary hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
                         >
-                            Cancel
+                            Vazgeç
                         </button>
                         <button
                             onClick={handleSaveSettings}
-                            className="px-4 py-2 text-sm font-bold bg-brand text-white rounded-lg hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
+                            disabled={hasSettingsError}
+                            className="h-7 rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-contrast transition-colors hover:opacity-90 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                            Save Parameters
+                            Kaydet
                         </button>
                     </div>
                 </div>
             </Modal>
 
-            {/* Header & Filters */}
-            <div className="p-5 border-b border-border bg-surface flex flex-col xl:flex-row gap-4 justify-between items-start xl:items-center">
-                <div>
-                    <h2 className="text-xl font-bold text-text flex items-center gap-2">
-                        <Zap className="text-brand" size={24} />
-                        Signal Manager
+            {/* Header */}
+            <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+                <div className="flex min-w-0 items-baseline gap-2">
+                    <h2 className="flex shrink-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-secondary">
+                        <Zap size={12} className="self-center" />
+                        Sinyal Yönetimi
                     </h2>
-                    <p className="text-secondary text-sm mt-1">
-                        Manage, analyze, and audit all generated trading signals.
+                    <p className="hidden truncate text-[11px] text-muted lg:block">
+                        Kural kayıtları ile webhook ve manuel sinyaller: filtrele, dışa aktar, sil.
                     </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3 w-full xl:w-auto">
-                    {/* Search */}
-                    <div className="relative flex-1 min-w-[200px]">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-secondary" size={14} />
-                        <input
-                            type="text"
-                            placeholder="Search Symbol..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="w-full bg-surface-secondary border border-transparent focus:border-primary rounded-lg pl-9 pr-4 py-2 text-sm text-text focus:outline-none transition-all"
-                        />
-                    </div>
-
-                    {/* Filters */}
-                    <select
-                        value={sideFilter}
-                        onChange={(e) => setSideFilter(e.target.value as any)}
-                        className="bg-surface-secondary border border-transparent focus:border-primary rounded-lg px-3 py-2 text-sm font-medium text-text focus:outline-none cursor-pointer"
-                    >
-                        <option value="ALL">All Sides</option>
-                        <option value="LONG">Long / Buy</option>
-                        <option value="SHORT">Short / Sell</option>
-                    </select>
-
-                    <select
-                        value={strategyFilter}
-                        onChange={(e) => setStrategyFilter(e.target.value)}
-                        className="bg-surface-secondary border border-transparent focus:border-primary rounded-lg px-3 py-2 text-sm font-medium text-text focus:outline-none cursor-pointer max-w-[150px]"
-                    >
-                        {uniqueStrategies.map(s => (
-                            <option key={s} value={s}>{s === 'ALL' ? 'All Strategies' : s}</option>
-                        ))}
-                    </select>
-
-                    {/* Actions */}
-                    <div className="h-8 w-[1px] bg-border mx-1 hidden sm:block"></div>
-
+                <div className="flex shrink-0 items-center gap-1">
                     <button
                         onClick={() => setIsSettingsOpen(true)}
-                        className="p-2 text-secondary hover:text-brand hover:bg-brand/10 rounded-lg transition-colors"
-                        title="Signal Parameters"
+                        className={ICON_BUTTON_CLASS}
+                        title="Sinyal kuralları"
+                        aria-label="Sinyal kuralları"
                     >
-                        <Settings size={18} />
+                        <Settings size={14} />
                     </button>
 
                     <button
                         onClick={exportCSV}
-                        className="p-2 text-secondary hover:text-text hover:bg-surface-secondary rounded-lg transition-colors"
-                        title="Export CSV"
+                        className={ICON_BUTTON_CLASS}
+                        title="CSV olarak dışa aktar"
+                        aria-label="CSV olarak dışa aktar"
                     >
-                        <Download size={18} />
+                        <Download size={14} />
                     </button>
 
                     <button
                         onClick={onClearAll}
-                        className="flex items-center gap-2 px-3 py-2 bg-danger/10 hover:bg-danger/20 text-danger rounded-lg text-sm font-medium transition-colors"
+                        className="ml-1 flex h-6 items-center gap-1.5 rounded-sm bg-danger-soft px-2 text-[11px] font-medium text-danger transition-colors hover:opacity-80 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
                     >
-                        <Trash2 size={16} />
-                        <span className="hidden sm:inline">Clear All</span>
+                        <Trash2 size={12} />
+                        <span className="hidden sm:inline">Tümünü temizle</span>
                     </button>
                 </div>
+            </header>
+
+            {/* Filters */}
+            <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1">
+                <div className="relative min-w-[140px] flex-1 sm:max-w-[240px]">
+                    <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted" size={12} />
+                    <input
+                        type="text"
+                        placeholder="Sembol ara..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        aria-label="Sembol ara"
+                        className={`${INPUT_CLASS} w-full pl-7`}
+                    />
+                </div>
+
+                <select
+                    value={sideFilter}
+                    onChange={(e) => setSideFilter(e.target.value as 'ALL' | SideKind)}
+                    aria-label="Yön filtresi"
+                    className={`${INPUT_CLASS} cursor-pointer`}
+                >
+                    <option value="ALL">Tüm yönler</option>
+                    <option value="UP">Yukarı (Buy / Long)</option>
+                    <option value="DOWN">Aşağı (Sell / Short)</option>
+                    <option value="NEUTRAL">Yönsüz</option>
+                </select>
+
+                <select
+                    value={strategyFilter}
+                    onChange={(e) => setStrategyFilter(e.target.value)}
+                    aria-label="Kural filtresi"
+                    className={`${INPUT_CLASS} max-w-[220px] cursor-pointer`}
+                >
+                    {uniqueStrategies.map(s => (
+                        <option key={s} value={s}>{s === 'ALL' ? 'Tüm kurallar' : getSignalLabel(s)}</option>
+                    ))}
+                </select>
             </div>
 
             {/* Table */}
-            <div className="flex-1 overflow-auto bg-surface-secondary/10">
-                <table className="min-w-full divide-y divide-border">
-                    <thead className="bg-surface sticky top-0 z-10 shadow-sm">
+            <div className="min-h-0 flex-1 overflow-auto">
+                <table className="w-full border-separate border-spacing-0 text-xs">
+                    <thead>
                         <tr>
-                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Time</th>
-                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Symbol</th>
-                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Side</th>
-                            <th className="px-6 py-3 text-right text-xs font-semibold text-secondary uppercase tracking-wider">Price</th>
-                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider">Strategy</th>
-                            <th className="px-6 py-3 text-left text-xs font-semibold text-secondary uppercase tracking-wider hidden md:table-cell">Context</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-secondary uppercase tracking-wider">Action</th>
+                            <th className={`${TH_CLASS} text-left`}>Zaman</th>
+                            <th className={`${TH_CLASS} text-left`}>Sembol</th>
+                            <th className={`${TH_CLASS} text-left`}>Yön</th>
+                            <th className={`${TH_CLASS} text-right`}>Büyüklük</th>
+                            <th className={`${TH_CLASS} text-right`}>Fiyat</th>
+                            <th className={`${TH_CLASS} text-left`}>Kural</th>
+                            <th className={`${TH_CLASS} hidden w-full text-left md:table-cell`}>Not</th>
+                            <th className={`${TH_CLASS} text-right`}>İşlem</th>
                         </tr>
                     </thead>
-                    <tbody className="bg-surface divide-y divide-border">
+                    <tbody>
                         {filteredSignals.length === 0 ? (
                             <tr>
-                                <td colSpan={7} className="px-6 py-12 text-center text-secondary">
-                                    <div className="flex flex-col items-center justify-center gap-3">
-                                        <Filter size={32} className="opacity-20" />
-                                        <p>No signals found matching criteria.</p>
+                                <td colSpan={8} className="px-3 py-8 text-center text-xs text-muted">
+                                    <div className="flex items-center justify-center gap-2">
+                                        <Filter size={14} />
+                                        <p>Filtreye uyan kayıt yok.</p>
                                     </div>
                                 </td>
                             </tr>
                         ) : (
                             filteredSignals.map((sig) => {
-                                const isLong = sig.side === 'BUY' || sig.side === 'LONG';
+                                const badge = getSideBadge(sig);
+                                const magnitude = getMagnitude(sig);
                                 const symbolBase = sig.symbol.replace('USDT', '');
                                 const iconUrl = `https://assets.coincap.io/assets/icons/${symbolBase.toLowerCase()}@2x.png`;
 
                                 return (
-                                    <tr key={sig.id} className="hover:bg-surface-secondary/50 transition-colors group">
-                                        <td className="px-6 py-4 whitespace-nowrap text-xs font-mono text-secondary">
+                                    <tr key={sig.id} className="hover:bg-surface-secondary">
+                                        <td className={`${TD_CLASS} font-mono text-[11px] text-secondary`}>
                                             {formatTime(sig.time)}
                                         </td>
-                                        <td className="px-6 py-4 whitespace-nowrap">
-                                            <div className="flex items-center gap-3">
-                                                <div className="relative w-6 h-6 rounded-full bg-surface-secondary flex items-center justify-center shrink-0 overflow-hidden">
+                                        <td className={TD_CLASS}>
+                                            <div className="flex items-center gap-1.5">
+                                                <div className="relative h-4 w-4 shrink-0 overflow-hidden rounded-full bg-surface-secondary">
                                                     <img
                                                         src={iconUrl}
-                                                        className="absolute inset-0 w-full h-full object-cover"
+                                                        className="absolute inset-0 h-full w-full object-cover"
                                                         onError={(e) => e.currentTarget.style.display = 'none'}
                                                     />
                                                 </div>
-                                                <span className="font-bold text-sm text-text">{symbolBase}</span>
+                                                <span className="font-medium text-text">{symbolBase}</span>
                                             </div>
                                         </td>
-                                        <td className="px-6 py-4 whitespace-nowrap">
-                                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold ${isLong ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'
-                                                }`}>
-                                                {isLong ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-                                                {sig.side}
+                                        <td className={TD_CLASS}>
+                                            <span
+                                                className={`inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 ${badge.tone}`}
+                                                title={badge.title}
+                                            >
+                                                {badge.kind === 'UP' && <ArrowUpRight size={10} />}
+                                                {badge.kind === 'DOWN' && <ArrowDownRight size={10} />}
+                                                {badge.text}
                                             </span>
                                         </td>
-                                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-mono font-medium text-text">
+                                        <td className={`${TD_CLASS} text-right font-mono font-semibold text-text`} title={magnitude?.caption || undefined}>
+                                            {magnitude ? magnitude.text : <span className="font-normal text-muted">—</span>}
+                                        </td>
+                                        <td className={`${TD_CLASS} text-right font-mono text-text`}>
                                             {formatPrice(sig.price)}
                                         </td>
-                                        <td className="px-6 py-4 whitespace-nowrap">
-                                            <div className="text-xs font-medium text-text bg-surface-secondary px-2 py-1 rounded w-fit border border-border">
-                                                {sig.strategy}
-                                            </div>
+                                        <td className={`${TD_CLASS} text-secondary`}>
+                                            {getSignalLabel(sig.strategy)}
                                         </td>
-                                        <td className="px-6 py-4 hidden md:table-cell">
-                                            <div className="text-xs text-secondary max-w-[200px] truncate" title={sig.note}>
+                                        {/* w-full + max-w-0: the column takes the spare width and truncates instead of widening the table */}
+                                        <td className={`${TD_CLASS} hidden w-full max-w-0 md:table-cell`}>
+                                            <div className="truncate text-muted" title={sig.note}>
                                                 {sig.note || '-'}
                                             </div>
                                         </td>
-                                        <td className="px-4 py-4 whitespace-nowrap text-right">
+                                        <td className={`${TD_CLASS} text-right`}>
                                             <button
                                                 onClick={() => onDelete(sig.id)}
-                                                className="text-secondary hover:text-danger p-2 hover:bg-danger/10 rounded-full transition-all opacity-0 group-hover:opacity-100"
-                                                title="Delete Signal"
+                                                className="inline-grid h-6 w-6 place-items-center rounded-sm text-muted transition-colors hover:bg-danger-soft hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
+                                                title="Kaydı sil"
+                                                aria-label="Kaydı sil"
                                             >
-                                                <Trash2 size={16} />
+                                                <Trash2 size={12} />
                                             </button>
                                         </td>
                                     </tr>
@@ -342,6 +568,6 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                     </tbody>
                 </table>
             </div>
-        </Card>
+        </section>
     );
 };

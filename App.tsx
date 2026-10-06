@@ -1,394 +1,541 @@
-import React from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
-import { GlassCard } from './components/ui/GlassCard';
-import { Watchlist } from './components/Watchlist';
-import { SignalFeed } from './components/SignalFeed';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import { notificationManager } from './utils/notifications';
 import { LiquidationsFeed } from './components/LiquidationsFeed';
-import { FundingRates } from './components/FundingRates';
-import { FidelioRadar } from './components/FidelioRadar';
-import { WebhookManager } from './components/WebhookManager';
-import { DatabaseViewer } from './components/DatabaseViewer';
-import { SignalManager } from './components/SignalManager';
-import { MobileNav } from './components/MobileNav';
-import { GlobalTicker } from './components/GlobalTicker';
-import { SpotScanner } from './components/SpotScanner';
-import { Portfolio } from './components/Portfolio';
-import { Settings, Moon, Sun, Hexagon, Sparkles, LayoutGrid, Palette, LogOut, Building2, LayoutDashboard, Activity, Wallet, Radar, FlaskConical, Bitcoin, Database, FlaskRound, Users } from 'lucide-react';
-import { AnomalyRadar } from './components/AnomalyRadar';
-import { FidelioAI } from './components/FidelioAI';
+import { MobileNav, MobileNavItem } from './components/MobileNav';
+import { Settings, Moon, Sun, Palette, LogOut, Building2, FlaskConical, Languages, Loader2 } from 'lucide-react';
 
 import { Modal } from './components/ui/Modal';
-import { SetAlertModal } from './components/SetAlertModal';
-import { NotificationSettings } from './components/NotificationSettings';
-import { NotificationSettingsPanel } from './components/NotificationSettingsPanel';
 import { ToastContainer } from './components/ui/Toast';
-import { SystemDiagnostics } from './components/SystemDiagnostics';
 import { Login } from './components/Login';
-import { LandingPage } from './components/LandingPage';
-import { NexusDashboard } from './components/NexusDashboard';
-import { TradeVisionDashboard } from './components/TradeVisionDashboard';
-import { UserManagementDashboard } from './components/UserManagementDashboard';
+import ErrorBoundary from './components/ErrorBoundary';
 
-import { UserProvider, useUser } from './context/UserContext';
+import { UserProvider, useUser, isAdminOnlyView, ViewMode } from './context/UserContext';
 import { MarketProvider, useMarketData } from './context/MarketContext';
 import { SignalProvider, useSignals } from './context/SignalContext';
 import { PortfolioProvider } from './context/PortfolioContext';
 
-import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
-import { Keyboard, Languages } from 'lucide-react';
+import { useKeyboardShortcuts, VIEW_SHORTCUTS } from './hooks/useKeyboardShortcuts';
 import { translations } from './utils/translations';
 
+// ---------------------------------------------------------------------------
+// Lazily loaded views and modal bodies (keeps the login screen and initial bundle small)
+// ---------------------------------------------------------------------------
+const FidelioRadar = lazy(() => import('./components/FidelioRadar').then(m => ({ default: m.FidelioRadar })));
+const Watchlist = lazy(() => import('./components/Watchlist').then(m => ({ default: m.Watchlist })));
+const SignalFeed = lazy(() => import('./components/SignalFeed').then(m => ({ default: m.SignalFeed })));
+const SpotScanner = lazy(() => import('./components/SpotScanner').then(m => ({ default: m.SpotScanner })));
+const FundingRates = lazy(() => import('./components/FundingRates').then(m => ({ default: m.FundingRates })));
+const AnomalyRadar = lazy(() => import('./components/AnomalyRadar').then(m => ({ default: m.AnomalyRadar })));
+const Portfolio = lazy(() => import('./components/Portfolio').then(m => ({ default: m.Portfolio })));
+const SignalManager = lazy(() => import('./components/SignalManager').then(m => ({ default: m.SignalManager })));
+const FidelioAI = lazy(() => import('./components/FidelioAI').then(m => ({ default: m.FidelioAI })));
+const SystemDiagnostics = lazy(() => import('./components/SystemDiagnostics').then(m => ({ default: m.SystemDiagnostics })));
+const DatabaseViewer = lazy(() => import('./components/DatabaseViewer').then(m => ({ default: m.DatabaseViewer })));
+const NexusDashboard = lazy(() => import('./components/NexusDashboard').then(m => ({ default: m.NexusDashboard })));
+const TradeVisionDashboard = lazy(() => import('./components/TradeVisionDashboard').then(m => ({ default: m.TradeVisionDashboard })));
+const UserManagementDashboard = lazy(() => import('./components/UserManagementDashboard').then(m => ({ default: m.UserManagementDashboard })));
+const WebhookManager = lazy(() => import('./components/WebhookManager').then(m => ({ default: m.WebhookManager })));
+// Terminal chunk loader, shared by lazy() and the preload below (dynamic imports are cached by the browser).
+const loadTerminalPage = () => import('./components/terminal/TerminalPage');
+const TerminalPage = lazy(() => loadTerminalPage().then(m => ({ default: m.TerminalPage })));
+const SetAlertModal = lazy(() => import('./components/SetAlertModal').then(m => ({ default: m.SetAlertModal })));
+const NotificationSettings = lazy(() => import('./components/NotificationSettings').then(m => ({ default: m.NotificationSettings })));
+const NotificationSettingsPanel = lazy(() => import('./components/NotificationSettingsPanel').then(m => ({ default: m.NotificationSettingsPanel })));
+
+// Downloads the Terminal chunk ahead of time (nav hover/focus, or idle after login) so opening it doesn't wait for JS.
+let terminalPreload: Promise<unknown> | null = null;
+const preloadTerminalPage = (): void => {
+    if (terminalPreload) return;
+    terminalPreload = loadTerminalPage().catch(() => {
+        terminalPreload = null; // allow a later retry; lazy() reports real failures when the view opens
+    });
+};
+const TERMINAL_IDLE_PRELOAD_DELAY_MS = 3_000;
+
+type Theme = ReturnType<typeof useUser>['theme'];
+
+// Shared control styles of the shell (Fidelio Terminal design system).
+const FOCUS_RING = 'focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
+const ICON_BUTTON = `grid h-7 w-7 shrink-0 place-items-center rounded-sm text-secondary transition-colors hover:bg-surface-secondary hover:text-text ${FOCUS_RING}`;
+const SEGMENT_BASE = `h-6 rounded-sm px-2 text-[11px] font-medium transition-colors ${FOCUS_RING}`;
+const SEGMENT_ACTIVE = 'bg-surface-highlight text-text';
+const SEGMENT_IDLE = 'text-secondary hover:text-text';
+const KBD = 'rounded-sm border border-border bg-surface-secondary px-1.5 font-mono text-[11px] text-secondary';
+
+const ViewLoading: React.FC = () => (
+    <div role="status" className="flex min-h-[240px] flex-1 items-center justify-center gap-2 text-xs text-muted">
+        <Loader2 size={14} className="animate-spin" />
+        Yükleniyor…
+    </div>
+);
+
+const ModalLoading: React.FC = () => (
+    <div role="status" className="flex items-center justify-center gap-2 py-6 text-xs text-muted">
+        <Loader2 size={14} className="animate-spin" />
+        Yükleniyor…
+    </div>
+);
+
+// ---------------------------------------------------------------------------
+// Header pieces (module scope so they are never re-created/remounted on re-render)
+// ---------------------------------------------------------------------------
+interface NavLinkProps {
+    mode: ViewMode;
+    label: string;
+    isActive: boolean;
+    onSelect: (mode: ViewMode) => void;
+    /** Called on hover/focus, e.g. to start downloading the view's code. */
+    onPreload?: () => void;
+}
+
+// Flat text tab; the active tab carries a 2px accent line that sits on the header's bottom edge.
+const NavLink: React.FC<NavLinkProps> = ({ mode, label, isActive, onSelect, onPreload }) => (
+    <button
+        type="button"
+        onClick={() => onSelect(mode)}
+        onPointerEnter={onPreload}
+        onFocus={onPreload}
+        aria-current={isActive ? 'page' : undefined}
+        className={`flex h-full shrink-0 items-center whitespace-nowrap border-b-2 px-2.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-primary ${isActive
+            ? 'border-primary text-text'
+            : 'border-transparent text-secondary hover:text-text'
+            }`}
+    >
+        {label}
+    </button>
+);
+
+// Only this small badge re-renders on market ticks, not the whole header.
+interface ConnectionBadgeProps {
+    connectedLabel: string;
+    connectingLabel: string;
+    staleLabel: string;
+    disconnectedLabel: string;
+}
+
+const ConnectionBadge: React.FC<ConnectionBadgeProps> = ({ connectedLabel, connectingLabel, staleLabel, disconnectedLabel }) => {
+    const { connectionStatus, isStale } = useMarketData();
+    const label = connectionStatus === 'connected'
+        ? connectedLabel
+        : connectionStatus === 'connecting'
+            ? connectingLabel
+            : isStale ? staleLabel : disconnectedLabel;
+    const dotClass = connectionStatus === 'connected'
+        ? 'bg-success'
+        : connectionStatus === 'disconnected' && !isStale ? 'bg-danger' : 'bg-warning';
+    return (
+        <div role="status" aria-label={label} title={label} className="flex shrink-0 items-center gap-1.5 px-1.5 text-[11px] text-secondary">
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
+            <span className="hidden whitespace-nowrap lg:inline">{label}</span>
+        </div>
+    );
+};
+
+// The toggle shows the icon of the theme the next click switches to.
+const THEME_ICONS: Record<Theme, React.ComponentType<{ size?: number }>> = {
+    light: Moon,
+    dark: Building2,
+    labs: FlaskConical,
+    corporate: Sun,
+};
+
+const ThemeIcon = ({ theme }: { theme: Theme }) => {
+    const Icon = THEME_ICONS[theme] ?? Sun;
+    return <Icon size={14} />;
+};
+
+// ---------------------------------------------------------------------------
+// Context-bound leaf components: each subscribes only to the data it needs
+// ---------------------------------------------------------------------------
+const ToastLayer: React.FC = () => {
+    const { toasts, dismissToast } = useSignals();
+    return <ToastContainer toasts={toasts} onDismiss={dismissToast} />;
+};
+
+const NotificationRulesSection: React.FC = () => {
+    const { rules, setRules } = useSignals();
+    return <NotificationSettings rules={rules} setRules={setRules} />;
+};
+
+const AlertModalBody: React.FC<{ symbol: string }> = ({ symbol }) => {
+    const { marketData } = useMarketData();
+    const { handleCreateAlert, closeAlertModal } = useSignals();
+    return (
+        <Suspense fallback={<ModalLoading />}>
+            <SetAlertModal symbol={symbol} currentPrice={marketData[symbol]?.lastPrice || 0} onSave={handleCreateAlert} onCancel={closeAlertModal} />
+        </Suspense>
+    );
+};
+
+const AlertModalLayer: React.FC = () => {
+    const { alertModal, closeAlertModal } = useSignals();
+    return (
+        <Modal isOpen={alertModal.isOpen} onClose={closeAlertModal} title={`Set Alert: ${alertModal.symbol?.replace('USDT', '')}`}>
+            {alertModal.symbol && <AlertModalBody symbol={alertModal.symbol} />}
+        </Modal>
+    );
+};
+
+const LiquidationsStrip: React.FC = () => {
+    const { liquidations } = useMarketData();
+    return <LiquidationsFeed liquidations={liquidations} />;
+};
+
+// ---------------------------------------------------------------------------
+// Views: edge-to-edge panel grids. Children are placed directly in the cells; the 1px lines
+// between panels are the grid's own background (gap-px + bg-border).
+// ---------------------------------------------------------------------------
+const DashboardView: React.FC = () => {
+    const { watchlist, addToWatchlist, removeFromWatchlist } = useUser();
+    const { marketData, futuresData, indicesData } = useMarketData();
+    const { signals, priceAlerts, openAlertModal, removePriceAlert } = useSignals();
+    return (
+        // lg+: chart + big-move radars on the left, watchlist over signal feed in a fixed right column.
+        // Below lg everything stacks and <main> scrolls.
+        <div className="grid w-full shrink-0 grid-cols-1 gap-px bg-border lg:h-full lg:min-h-0 lg:shrink lg:grid-cols-[minmax(0,1fr)_360px] lg:grid-rows-[minmax(0,1fr)]">
+            <div className="min-w-0 bg-surface lg:min-h-0 lg:overflow-y-auto lg:overflow-x-hidden">
+                <FidelioRadar spotData={marketData} futuresData={futuresData} indicesData={indicesData} />
+            </div>
+            <div className="grid min-w-0 grid-cols-1 gap-px bg-border md:grid-cols-2 lg:min-h-0 lg:grid-cols-1 lg:grid-rows-[minmax(0,1fr)_minmax(0,1fr)]">
+                <div className="h-[420px] min-h-0 min-w-0 bg-surface lg:h-auto">
+                    <Watchlist symbols={watchlist} data={marketData} activeAlerts={priceAlerts} onAdd={addToWatchlist} onRemove={removeFromWatchlist} onSetAlert={openAlertModal} onRemoveAlert={removePriceAlert} />
+                </div>
+                <div className="h-[420px] min-h-0 min-w-0 bg-surface lg:h-auto">
+                    <SignalFeed signals={signals} marketData={marketData} />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const SpotScannerView: React.FC = () => {
+    const { marketData } = useMarketData();
+    return <SpotScanner data={marketData} />;
+};
+
+const FundingView: React.FC = () => {
+    const { marketData, futuresData } = useMarketData();
+    return <FundingRates data={futuresData} spotData={marketData} />;
+};
+
+const RadarView: React.FC = () => {
+    const { marketData, futuresData, fundingHistory } = useMarketData();
+    return <AnomalyRadar data={futuresData} spotData={marketData} fundingHistory={fundingHistory} />;
+};
+
+const PortfolioView: React.FC = () => {
+    const { marketData } = useMarketData();
+    return <Portfolio data={marketData} />;
+};
+
+const SignalsManagerView: React.FC = () => {
+    const { signals, handleDeleteSignal, handleClearAllSignals } = useSignals();
+    return <SignalManager signals={signals} onDelete={handleDeleteSignal} onClearAll={handleClearAllSignals} />;
+};
+
+const FidelioAIView: React.FC = () => {
+    const { marketData, futuresData } = useMarketData();
+    return <FidelioAI spotData={marketData} futuresData={futuresData} />;
+};
+
+const ActiveView: React.FC<{ view: ViewMode }> = ({ view }) => {
+    switch (view) {
+        case 'dashboard': return <DashboardView />;
+        case 'spot-scanner': return <SpotScannerView />;
+        case 'funding': return <FundingView />;
+        case 'radar': return <RadarView />;
+        case 'portfolio': return <PortfolioView />;
+        case 'signals-manager': return <SignalsManagerView />;
+        case 'fidelio-ai': return <FidelioAIView />;
+        case 'nexus': return <NexusDashboard />;
+        case 'journal': return <TradeVisionDashboard />;
+        case 'terminal': return <TerminalPage />;
+        // Admin-only views (AppContent never passes these for non-admins; the server enforces it too)
+        case 'lab': return <SystemDiagnostics />;
+        case 'database': return <DatabaseViewer />;
+        case 'user-management': return <UserManagementDashboard />;
+        case 'webhook': return <WebhookManager />;
+        default: return null;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// App shell (rendered only for authenticated users)
+// ---------------------------------------------------------------------------
 const AppContent: React.FC = () => {
-    const { theme, toggleTheme, viewMode, setViewMode, watchlist, addToWatchlist, removeFromWatchlist, isSettingsOpen, setIsSettingsOpen, visualMode, toggleVisualMode, isAuthenticated, logout, login, language, setLanguage } = useUser();
-    const { marketData, futuresData, indicesData, liquidations, connectionStatus, fundingHistory } = useMarketData();
-    const { signals, rules, setRules, priceAlerts, toasts, dismissToast, handleDeleteSignal, handleClearAllSignals, handleManualSignal, alertModal, openAlertModal, closeAlertModal, handleCreateAlert, addToast } = useSignals();
+    const { theme, toggleTheme, viewMode, setViewMode, isSettingsOpen, setIsSettingsOpen, visualMode, toggleVisualMode, logout, language, setLanguage, isAdmin, user } = useUser();
 
     const t = translations[language];
 
-    // Scalper Mode State
-    const [showShortcutsHelp, setShowShortcutsHelp] = React.useState(false);
+    // Render guard: a non-admin can never render an admin-only view, even for one frame.
+    const activeView: ViewMode = !isAdmin && isAdminOnlyView(viewMode) ? 'dashboard' : viewMode;
+
+    const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+    const openHelp = useCallback(() => setShowShortcutsHelp(true), []);
+    const closeHelp = useCallback(() => setShowShortcutsHelp(false), []);
+    const closeSettings = useCallback(() => setIsSettingsOpen(false), [setIsSettingsOpen]);
+
+    // Preload the Terminal chunk once the browser is idle shortly after login.
+    useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        let idleHandle: number | null = null;
+        const timer = window.setTimeout(() => {
+            if (typeof window.requestIdleCallback === 'function') {
+                idleHandle = window.requestIdleCallback(() => {
+                    idleHandle = null;
+                    preloadTerminalPage();
+                }, { timeout: 5_000 });
+            } else {
+                preloadTerminalPage();
+            }
+        }, TERMINAL_IDLE_PRELOAD_DELAY_MS);
+        return () => {
+            window.clearTimeout(timer);
+            if (idleHandle !== null && typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(idleHandle);
+        };
+    }, []);
 
     useKeyboardShortcuts({
-        setViewMode: (mode) => {
-            setViewMode(mode);
-            addToast('View Switched', `Active View: ${mode.toUpperCase().replace('-', ' ')}`, 'info');
-        },
-        toggleSearch: () => {
-            // Logic to focus search input if available, or toggle a search modal
-            // For now just partial stub or focus existing search if we had one global
-            addToast('Focus Search', 'Search feature active', 'info');
-        },
-        togglePause: () => {
-            addToast('Stream Paused', 'Data stream paused (Visual only)', 'warning');
-        },
-        onHelp: () => setShowShortcutsHelp(true),
+        setViewMode,
+        onHelp: openHelp,
         closeModals: () => {
             setIsSettingsOpen(false);
-            closeAlertModal();
             setShowShortcutsHelp(false);
         }
     });
 
-    if (!isAuthenticated) {
-        return <Login />;
-    }
+    const navItems = useMemo<MobileNavItem[]>(() => {
+        const items: MobileNavItem[] = [
+            { mode: 'dashboard', label: t.markets },
+            { mode: 'terminal', label: 'Terminal' },
+            { mode: 'spot-scanner', label: t.spotSniper },
+            { mode: 'funding', label: t.derivatives },
+            { mode: 'radar', label: t.radar },
+            { mode: 'portfolio', label: t.portfolio },
+            { mode: 'signals-manager', label: t.signals },
+            { mode: 'nexus', label: t.nexus },
+            { mode: 'fidelio-ai', label: t.fidelioAi },
+            { mode: 'journal', label: t.journal },
+            { mode: 'database', label: t.database },
+            { mode: 'user-management', label: language === 'en' ? 'Users' : 'Kullanıcılar' },
+            { mode: 'webhook', label: 'Webhook' },
+            { mode: 'lab', label: t.lab },
+        ];
+        return items.filter(item => isAdmin || !isAdminOnlyView(item.mode));
+    }, [t, language, isAdmin]);
 
-    const getGradientClasses = () => {
-        if (theme === 'corporate') return 'from-violet-600 to-purple-600';
-        if (theme === 'labs') return 'from-blue-500 via-indigo-500 to-cyan-400';
-        return 'from-purple-400 to-amber-400';
-    };
+    const labelForView = (mode: ViewMode) => navItems.find(item => item.mode === mode)?.label ?? mode;
 
-    const getActiveUnderlineClasses = () => {
-        if (theme === 'corporate') return 'from-violet-600 to-purple-600';
-        if (theme === 'labs') return 'from-blue-500 to-cyan-400';
-        return 'from-purple-500 to-amber-500';
-    };
-
-    const NavLink = ({ mode, label, icon }: { mode: any, label: string, icon?: React.ReactNode }) => (
-        <button
-            onClick={() => setViewMode(mode)}
-            className={`relative px-3 py-3 text-sm font-medium transition-all flex items-center gap-2 ${viewMode === mode
-                ? `text-transparent bg-gradient-to-r ${getGradientClasses()} bg-clip-text font-bold`
-                : (theme === 'corporate' || theme === 'labs') ? 'text-gray-600 hover:text-gray-900' : 'text-gray-500 hover:text-gray-300'
-                }`}
-        >
-            {icon}
-            {label}
-            {viewMode === mode && (
-                <span className={`absolute bottom-0 left-0 w-full h-[2px] bg-gradient-to-r ${getActiveUnderlineClasses()}`} />
-            )}
-        </button>
-    );
-
-    const getBackgroundClass = () => {
-        if (theme === 'corporate') return 'bg-[#FAFBFC] text-gray-900';
-        if (theme === 'labs') return 'bg-[#F0F2F5] text-[#1F2937]';
-        return visualMode === 'vibrant' ? 'bg-black text-gray-200' : 'bg-gray-950 text-gray-200';
-    };
+    const userName = user?.name || user?.username || '';
+    const userInitial = (userName.trim().charAt(0) || 'U').toUpperCase();
 
     return (
+        // App shell: header (h-11) / main (fills the rest, no padding) / liquidation strip (h-8), all in flow.
+        // Below md the fixed MobileNav sits under the column, so the column keeps that much room free.
         <div
             onClick={() => notificationManager.resumeAudioContext()}
-            className={`min-h-screen ${getBackgroundClass()} font-sans selection:bg-purple-500/30 flex flex-col ${visualMode === 'minimal' ? 'minimal-mode' : ''} ${theme === 'labs' ? 'font-mono tracking-tight' : ''}`}
+            className={`flex h-dvh flex-col overflow-hidden bg-background pb-[calc(3rem+env(safe-area-inset-bottom))] font-sans text-text selection:bg-primary-soft md:pb-0 ${visualMode === 'minimal' ? 'minimal-mode' : ''}`}
         >
-            {/* ... existing ambience code ... */}
-            {/* Labs Ambient */}
-            {theme === 'labs' && (
-                <div className="fixed inset-0 overflow-hidden pointer-events-none">
-                    <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-[#E8F0FE] rounded-full blur-[120px] opacity-70"></div>
-                    <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-[#CEEAD6] rounded-full blur-[120px] opacity-50"></div>
-                </div>
-            )}
+            <ToastLayer />
 
-            {/* Ambient Background */}
-            {visualMode === 'vibrant' && theme !== 'corporate' && (
-                <div className="fixed inset-0 overflow-hidden pointer-events-none">
-                    <div className="absolute top-0 right-0 w-[800px] h-[800px] bg-purple-600/10 rounded-full blur-[120px]"></div>
-                    <div className="absolute bottom-0 left-0 w-[600px] h-[600px] bg-amber-600/10 rounded-full blur-[120px]"></div>
-                </div>
-            )}
-            {theme === 'corporate' && (
-                <div className="fixed inset-0 overflow-hidden pointer-events-none">
-                    <div className="absolute top-0 right-0 w-[800px] h-[800px] bg-violet-500/5 rounded-full blur-[120px]"></div>
-                    <div className="absolute bottom-0 left-0 w-[600px] h-[600px] bg-purple-500/5 rounded-full blur-[120px]"></div>
-                </div>
-            )}
-
-            <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-
-            <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title={t.preferences} maxWidth="max-w-2xl">
-                <div className="space-y-6">
-                    <div className="p-4 bg-white/5 rounded-xl border border-white/10">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <div className="p-2 bg-blue-500/10 rounded-lg">
-                                    <Languages size={20} className="text-blue-400" />
-                                </div>
-                                <div>
-                                    <h3 className="font-bold">{t.language}</h3>
-                                    <p className="text-xs text-gray-400">Uygulama dilini seçin</p>
-                                </div>
-                            </div>
-                            <div className="flex bg-black/40 p-1 rounded-lg border border-white/10">
-                                <button
-                                    onClick={() => setLanguage('tr')}
-                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${language === 'tr' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
-                                >
-                                    TR
-                                </button>
-                                <button
-                                    onClick={() => setLanguage('en')}
-                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${language === 'en' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
-                                >
-                                    EN
-                                </button>
-                            </div>
+            <Modal isOpen={isSettingsOpen} onClose={closeSettings} title={t.preferences} maxWidth="max-w-2xl" flush>
+                <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                        <Languages size={14} className="shrink-0 text-secondary" />
+                        <div className="min-w-0">
+                            <h3 className="text-xs font-medium text-text">{t.language}</h3>
+                            <p className="text-[11px] text-muted">Uygulama dilini seçin</p>
                         </div>
                     </div>
-                    <NotificationSettingsPanel />
-                    <div className="border-t border-white/10 pt-6">
-                        <NotificationSettings rules={rules} setRules={setRules} />
-                    </div>
-                </div>
-            </Modal>
-
-            <Modal isOpen={alertModal.isOpen} onClose={closeAlertModal} title={`Set Alert: ${alertModal.symbol?.replace('USDT', '')}`}>
-                {alertModal.symbol && <SetAlertModal symbol={alertModal.symbol} currentPrice={marketData[alertModal.symbol]?.lastPrice || 0} onSave={handleCreateAlert} onCancel={closeAlertModal} />}
-            </Modal>
-
-            <Modal isOpen={showShortcutsHelp} onClose={() => setShowShortcutsHelp(false)} title="Scalper Shortcuts" maxWidth="max-w-md">
-                <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                        <div className="p-3 bg-white/5 rounded-lg border border-white/10">
-                            <div className="text-xs text-gray-500 mb-1">Navigation</div>
-                            <div className="space-y-2">
-                                <div className="flex justify-between"><span>Dashboard</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">1</kbd></div>
-                                <div className="flex justify-between"><span>Radar</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">2</kbd></div>
-                                <div className="flex justify-between"><span>Perps</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">3</kbd></div>
-                                <div className="flex justify-between"><span>Cmd Center</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">4</kbd></div>
-                                <div className="flex justify-between"><span>Portfolio</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">5</kbd></div>
-                            </div>
-                        </div>
-                        <div className="p-3 bg-white/5 rounded-lg border border-white/10">
-                            <div className="text-xs text-gray-500 mb-1">Actions</div>
-                            <div className="space-y-2">
-                                <div className="flex justify-between"><span>Search</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">F</kbd></div>
-                                <div className="flex justify-between"><span>Pause Stream</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">Space</kbd></div>
-                                <div className="flex justify-between"><span>Close Modal</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">Esc</kbd></div>
-                                <div className="flex justify-between"><span>Help</span> <kbd className="bg-black/20 px-1.5 rounded text-xs font-mono">?</kbd></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </Modal>
-
-            <header className={`sticky top-0 z-30 shrink-0 h-14 transition-all border-b ${theme === 'labs'
-                ? 'bg-[#F0F2F5]/95 border-transparent shadow-none'
-                : theme === 'corporate'
-                    ? 'bg-white/90 backdrop-blur-xl border-gray-200 shadow-sm'
-                    : 'bg-black/80 backdrop-blur-xl border-white/10 shadow-[0_0_40px_rgba(168,85,247,0.1)]'
-                }`}>
-                <div className="w-full px-6 h-full flex items-center justify-between">
-                    <div className="flex items-center gap-6 h-full overflow-x-auto scrollbar-hide">
-                        <div className="flex items-center gap-2 group cursor-pointer shrink-0" onClick={() => setViewMode('dashboard')}>
-                            <span className={`text-xl font-display font-black tracking-wider uppercase ${theme === 'labs'
-                                ? 'text-gray-900'
-                                : theme === 'corporate'
-                                    ? 'text-violet-600'
-                                    : 'bg-gradient-to-r from-purple-500 via-violet-500 to-amber-500 bg-clip-text text-transparent drop-shadow-[0_0_15px_rgba(168,85,247,0.3)]'
-                                }`}>
-                                FIDELIO
-                            </span>
-                        </div>
-                        <nav className="flex gap-2 h-full shrink-0">
-                            <NavLink mode="dashboard" label={t.markets} />
-                            <NavLink mode="spot-scanner" label={t.spotSniper} />
-                            <NavLink mode="funding" label={t.derivatives} />
-                            <NavLink mode="radar" label={t.radar} icon={<Radar size={14} />} />
-                            <NavLink mode="portfolio" label={t.portfolio} />
-                            <NavLink mode="signals-manager" label={t.signals} />
-
-                            <NavLink mode="nexus" label={t.nexus} icon={<Activity size={14} />} />
-                            <NavLink mode="fidelio-ai" label={t.fidelioAi} icon={<Sparkles size={14} className={viewMode === 'fidelio-ai' ? 'animate-pulse' : ''} />} />
-                            <NavLink mode="journal" label={t.journal} icon={<Database size={14} />} />
-                            <NavLink mode="database" label={t.database} icon={<Database size={14} />} />
-                            <NavLink mode="user-management" label="Users" icon={<Users size={14} />} />
-                            <NavLink mode="lab" label={t.lab} />
-                        </nav>
-                    </div>
-
-
-
-                    <div className="flex items-center gap-3 shrink-0">
-                        <div className={`hidden lg:flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-md backdrop-blur-xl ${theme === 'corporate'
-                            ? 'bg-gray-100 border border-gray-200'
-                            : 'bg-white/5 border border-white/10'
-                            }`}>
-                            <div className={`w-1.5 h-1.5 rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-                            <span className={theme === 'corporate' ? 'text-gray-600' : 'text-gray-400'}>{connectionStatus === 'connected' ? t.connected : t.connecting}</span>
-                        </div>
+                    <div className="inline-flex shrink-0 rounded-sm border border-border p-0.5">
                         <button
-                            onClick={toggleVisualMode}
-                            className={`p-2 rounded-md transition-colors relative group ${theme === 'corporate'
-                                ? 'hover:bg-gray-100 text-gray-500 hover:text-gray-900'
-                                : 'hover:bg-white/5 text-gray-500 hover:text-gray-300'
-                                }`}
-                            title={visualMode === 'vibrant' ? t.switchMinimal : t.switchVibrant}
+                            type="button"
+                            onClick={() => setLanguage('tr')}
+                            aria-pressed={language === 'tr'}
+                            className={`${SEGMENT_BASE} ${language === 'tr' ? SEGMENT_ACTIVE : SEGMENT_IDLE}`}
                         >
-                            <Palette size={18} className={visualMode === 'vibrant' ? (theme === 'corporate' ? 'text-violet-600' : 'text-purple-400') : (theme === 'corporate' ? 'text-gray-400' : 'text-gray-500')} />
-                            <span className={`absolute -bottom-8 right-0 text-[10px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap ${theme === 'corporate' ? 'bg-gray-800 text-white' : 'bg-black/90'}`}>
-                                {visualMode === 'vibrant' ? t.minimal : t.vibrant}
-                            </span>
+                            TR
                         </button>
-                        <button onClick={toggleTheme} className={`p-2 rounded-md transition-colors ${theme === 'corporate' ? 'hover:bg-gray-100 text-gray-500 hover:text-gray-900' : 'hover:bg-white/5 text-gray-500 hover:text-gray-300'}`}>
-                            <ThemeIcon theme={theme} />
+                        <button
+                            type="button"
+                            onClick={() => setLanguage('en')}
+                            aria-pressed={language === 'en'}
+                            className={`${SEGMENT_BASE} ${language === 'en' ? SEGMENT_ACTIVE : SEGMENT_IDLE}`}
+                        >
+                            EN
                         </button>
-                        <button onClick={() => setIsSettingsOpen(true)} className={`p-2 rounded-md transition-colors ${theme === 'corporate' ? 'hover:bg-gray-100 text-gray-500 hover:text-gray-900' : 'hover:bg-white/5 text-gray-500 hover:text-gray-300'}`}>
-                            <Settings size={18} />
-                        </button>
-                        <button onClick={logout} className="p-2 rounded-md hover:bg-white/5 text-red-500 hover:text-red-400 transition-colors" title={t.logout}>
-                            <LogOut size={18} />
-                        </button>
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-xs cursor-pointer hover:opacity-90 ${theme === 'corporate'
-                            ? 'bg-gradient-to-br from-violet-600 to-purple-600 shadow-lg'
-                            : 'bg-gradient-to-br from-purple-600 to-amber-600 shadow-[0_0_15px_rgba(168,85,247,0.3)]'
-                            }`}>
-                            U
+                    </div>
+                </div>
+                <ErrorBoundary>
+                    <Suspense fallback={<ModalLoading />}>
+                        <NotificationSettingsPanel />
+                        <NotificationRulesSection />
+                    </Suspense>
+                </ErrorBoundary>
+            </Modal>
+
+            <AlertModalLayer />
+
+            <Modal isOpen={showShortcutsHelp} onClose={closeHelp} title="Klavye Kısayolları" maxWidth="max-w-md" flush>
+                <div className="grid grid-cols-2 gap-px border-b border-border bg-border text-xs text-text">
+                    <section className="bg-surface">
+                        <h3 className="flex h-7 items-center border-b border-border px-3 text-[10px] font-medium uppercase tracking-wider text-muted">Gezinme</h3>
+                        {VIEW_SHORTCUTS.map(shortcut => (
+                            <div key={shortcut.key} className="flex h-7 items-center justify-between gap-2 border-b border-border px-3 last:border-b-0">
+                                <span className="truncate">{labelForView(shortcut.view)}</span>
+                                <kbd className={KBD}>{shortcut.key}</kbd>
+                            </div>
+                        ))}
+                    </section>
+                    <section className="bg-surface">
+                        <h3 className="flex h-7 items-center border-b border-border px-3 text-[10px] font-medium uppercase tracking-wider text-muted">Genel</h3>
+                        <div className="flex h-7 items-center justify-between gap-2 border-b border-border px-3">
+                            <span className="truncate">Pencereyi kapat</span>
+                            <kbd className={KBD}>Esc</kbd>
                         </div>
+                        <div className="flex h-7 items-center justify-between gap-2 border-b border-border px-3">
+                            <span className="truncate">Kısayol yardımı</span>
+                            <kbd className={KBD}>?</kbd>
+                        </div>
+                    </section>
+                </div>
+                <p className="px-3 py-2 text-[11px] text-muted">Kısayollar bir metin alanına yazarken ve Ctrl/Cmd/Alt tuşlarıyla birlikte çalışmaz.</p>
+            </Modal>
+
+            <header className="flex h-11 shrink-0 items-stretch border-b border-border bg-surface">
+                <button
+                    type="button"
+                    onClick={() => setViewMode('dashboard')}
+                    className={`flex shrink-0 items-center px-3 ${FOCUS_RING}`}
+                >
+                    <span className="text-gradient-violet text-sm font-bold uppercase tracking-wide">FIDELIO</span>
+                </button>
+
+                {/* Flat text tabs (md+; below md the bottom MobileNav is the navigation). Scrolls sideways without a
+                    scrollbar when it overflows; -mb-px lets the active tab's accent line cover the header border. */}
+                <nav className="-mb-px hidden min-w-0 flex-1 items-stretch overflow-x-auto scrollbar-hide md:flex">
+                    {navItems.map(item => (
+                        <NavLink
+                            key={item.mode}
+                            mode={item.mode}
+                            label={item.label}
+                            isActive={activeView === item.mode}
+                            onSelect={setViewMode}
+                            onPreload={item.mode === 'terminal' ? preloadTerminalPage : undefined}
+                        />
+                    ))}
+                </nav>
+
+                <div className="ml-auto flex shrink-0 items-center gap-0.5 px-2 md:border-l md:border-border">
+                    <ConnectionBadge connectedLabel={t.connected} connectingLabel={t.connecting} staleLabel={t.dataStale} disconnectedLabel={t.disconnected} />
+                    <button
+                        type="button"
+                        onClick={toggleTheme}
+                        className={ICON_BUTTON}
+                        title={language === 'en' ? 'Theme' : 'Tema'}
+                        aria-label={language === 'en' ? 'Theme' : 'Tema'}
+                    >
+                        <ThemeIcon theme={theme} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={toggleVisualMode}
+                        className={ICON_BUTTON}
+                        title={visualMode === 'vibrant' ? t.switchMinimal : t.switchVibrant}
+                        aria-label={visualMode === 'vibrant' ? t.switchMinimal : t.switchVibrant}
+                        aria-pressed={visualMode === 'vibrant'}
+                    >
+                        <Palette size={14} className={visualMode === 'vibrant' ? 'text-primary' : ''} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setLanguage(language === 'tr' ? 'en' : 'tr')}
+                        className={`${ICON_BUTTON} font-mono text-[11px] font-semibold uppercase`}
+                        title={t.language}
+                        aria-label={t.language}
+                    >
+                        {language}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setIsSettingsOpen(true)}
+                        className={ICON_BUTTON}
+                        title={t.preferences}
+                        aria-label={t.preferences}
+                    >
+                        <Settings size={14} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={logout}
+                        className={`grid h-7 w-7 shrink-0 place-items-center rounded-sm text-danger transition-colors hover:bg-danger-soft ${FOCUS_RING}`}
+                        title={t.logout}
+                        aria-label={t.logout}
+                    >
+                        <LogOut size={14} />
+                    </button>
+                    <div
+                        title={userName || undefined}
+                        className="ml-1 hidden h-6 w-6 shrink-0 place-items-center rounded-sm bg-primary-soft text-[11px] font-semibold text-primary sm:grid"
+                    >
+                        {userInitial}
                     </div>
                 </div>
             </header>
 
-            <main className="flex-1 w-full px-6 py-6 overflow-hidden flex flex-col relative z-10 pb-16">
-                <AnimatePresence mode="wait">
-                    <motion.div
-                        key={viewMode}
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: 20 }}
-                        transition={{ duration: 0.3 }}
-                        className="h-full flex flex-col"
-                    >
-                        {viewMode === 'dashboard' && (
-                            <div className="flex flex-col gap-4 h-full">
-                                <div className="shrink-0">
-                                    <div className="mb-4">
-                                        <FidelioRadar spotData={marketData} futuresData={futuresData} indicesData={indicesData} />
-                                    </div>
-                                </div>
-                                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 min-h-0">
-                                    <div className="lg:col-span-4 flex flex-col h-full min-h-[400px]">
-                                        <Watchlist symbols={watchlist} data={marketData} activeAlerts={priceAlerts} onAdd={addToWatchlist} onRemove={removeFromWatchlist} onSetAlert={openAlertModal} />
-                                    </div>
-                                    <div className="lg:col-span-8 flex flex-col h-full min-h-[400px]">
-                                        <SignalFeed signals={signals} marketData={marketData} />
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {viewMode === 'spot-scanner' && <SpotScanner data={marketData} />}
-
-                        {viewMode === 'funding' && (
-                            <div className="h-full flex flex-col gap-4">
-                                <div className="flex flex-col gap-1 px-1">
-                                    <h2 className={`text-xl font-bold bg-gradient-to-r ${getGradientClasses()} bg-clip-text text-transparent`}>{t.derivativesOverview}</h2>
-                                    <p className={theme === 'corporate' ? 'text-gray-500 text-sm' : 'text-gray-500 text-sm'}>{t.derivativesDesc}</p>
-                                </div>
-                                <GlassCard className="flex-1 overflow-hidden"><FundingRates data={futuresData} spotData={marketData} /></GlassCard>
-                            </div>
-                        )}
-
-                        {viewMode === 'radar' && (
-                            <div className="h-full flex flex-col gap-4">
-                                <div className="flex flex-col gap-1 px-1">
-                                    <h2 className={`text-xl font-bold bg-gradient-to-r ${getGradientClasses()} bg-clip-text text-transparent`}>{t.marketAnomalyRadar}</h2>
-                                    <p className={theme === 'corporate' ? 'text-gray-500 text-sm' : 'text-gray-500 text-sm'}>{t.radarDesc}</p>
-                                </div>
-                                <GlassCard className="flex-1 overflow-hidden"><AnomalyRadar data={futuresData} spotData={marketData} fundingHistory={fundingHistory} /></GlassCard>
-                            </div>
-                        )}
-
-                        {viewMode === 'portfolio' && (
-                            <div className="h-full flex flex-col gap-4">
-                                <div className="flex flex-col gap-1 px-1">
-                                    <h2 className={`text-xl font-bold bg-gradient-to-r ${getGradientClasses()} bg-clip-text text-transparent`}>{t.portfolioTracker}</h2>
-                                    <p className={theme === 'corporate' ? 'text-gray-500 text-sm' : 'text-gray-500 text-sm'}>{t.portfolioDesc}</p>
-                                </div>
-                                <GlassCard className="flex-1 overflow-hidden"><Portfolio data={marketData} /></GlassCard>
-                            </div>
-                        )}
-
-                        {viewMode === 'signals-manager' && <SignalManager signals={signals} onDelete={handleDeleteSignal} onClearAll={handleClearAllSignals} />}
-                        {viewMode === 'fidelio-ai' && <FidelioAI spotData={marketData} futuresData={futuresData} />}
-
-                        {viewMode === 'lab' && <SystemDiagnostics />}
-                        {viewMode === 'database' && <DatabaseViewer />}
-                        {viewMode === 'nexus' && <NexusDashboard />}
-                        {viewMode === 'journal' && <TradeVisionDashboard />}
-                        {viewMode === 'user-management' && <UserManagementDashboard />}
-                    </motion.div>
-                </AnimatePresence>
+            {/* No padding and no gap: every view fills <main> edge to edge. Below lg <main> scrolls and views are
+                naturally tall; from lg up the view gets the exact height and scrolls inside its own panels. */}
+            <main className="relative min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden lg:overflow-hidden">
+                <div
+                    key={activeView}
+                    className="flex min-h-full w-full flex-col lg:h-full lg:min-h-0 lg:overflow-y-auto lg:overflow-x-hidden"
+                >
+                    <ErrorBoundary>
+                        <Suspense fallback={<ViewLoading />}>
+                            <ActiveView view={activeView} />
+                        </Suspense>
+                    </ErrorBoundary>
+                </div>
             </main>
 
-            <div className={`fixed bottom-0 left-0 right-0 h-10 backdrop-blur-xl z-40 ${(theme === 'corporate' || theme === 'labs')
-                ? 'bg-white/90 border-t border-gray-200'
-                : 'bg-black/80 border-t border-white/10'
-                }`}>
-                <LiquidationsFeed liquidations={liquidations} />
+            {/* Liquidation ticker: an in-flow strip under <main> (above the mobile nav on small screens). */}
+            <div className="h-8 shrink-0 border-t border-border bg-surface">
+                <LiquidationsStrip />
             </div>
             <MobileNav
-                currentView={viewMode}
+                currentView={activeView}
                 setView={setViewMode}
-                onMenuClick={() => setViewMode('dashboard')}
+                menuItems={navItems}
             />
         </div>
     );
 };
 
+// Market data, signals and portfolio only exist for a logged-in session: nothing (WebSockets,
+// scanners, socket.io) runs on the login screen, and everything is torn down on logout.
+const AuthenticatedApp: React.FC = () => (
+    <MarketProvider>
+        <SignalProvider>
+            <PortfolioProvider>
+                <AppContent />
+            </PortfolioProvider>
+        </SignalProvider>
+    </MarketProvider>
+);
+
+const AuthGate: React.FC = () => {
+    const { isAuthenticated } = useUser();
+    return isAuthenticated ? <AuthenticatedApp /> : <Login />;
+};
+
 const App: React.FC = () => {
     return (
-        <MarketProvider>
+        <ErrorBoundary fullScreen>
             <UserProvider>
-                <SignalProvider>
-                    <PortfolioProvider>
-                        <AppContent />
-                    </PortfolioProvider>
-                </SignalProvider>
+                <AuthGate />
             </UserProvider>
-        </MarketProvider>
+        </ErrorBoundary>
     );
 };
-
-
-const ThemeIcon = ({ theme }: { theme: 'light' | 'dark' | 'corporate' | 'labs' }) => {
-    if (theme === 'light') return <Moon size={18} />;
-    if (theme === 'dark') return <Building2 size={18} />;
-    if (theme === 'labs') return <FlaskConical size={18} />;
-    return <Sun size={18} />;
-};
-
 
 export default App;

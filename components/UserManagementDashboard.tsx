@@ -1,27 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { AnimatePresence } from 'framer-motion';
-import { User, UserActivity } from '../types';
-import { userService } from '../services/userService';
+import { User } from '../types';
+import { userService, describeUserApiError } from '../services/userService';
+import { useUser } from '../context/UserContext';
 import UserStatsCards from './user-management/UserStatsCards';
 import UserTable from './user-management/UserTable';
-import AddEditUserModal from './user-management/AddEditUserModal';
-import UserActivityModal from './user-management/UserActivityModal';
-import { UserPlus, Search, RefreshCw } from 'lucide-react';
+import AddEditUserModal, { UserSavePayload } from './user-management/AddEditUserModal';
+import { UserPlus, Search, RefreshCw, AlertCircle, ShieldOff } from 'lucide-react';
 
 export const UserManagementDashboard: React.FC = () => {
+    const { user: currentUser, isAdmin, refreshUser, endSession } = useUser();
     const [users, setUsers] = useState<User[]>([]);
     const [filteredUsers, setFilteredUsers] = useState<User[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [actionError, setActionError] = useState<string | null>(null);
     const [isAddEditModalOpen, setIsAddEditModalOpen] = useState(false);
     const [selectedUser, setSelectedUser] = useState<User | null>(null);
-    const [activityModalUser, setActivityModalUser] = useState<{ id: string; name: string } | null>(null);
-    const [userActivities, setUserActivities] = useState<UserActivity[]>([]);
 
-    // Load users on mount
+    // Load users on mount (admins only; the server rejects everyone else anyway)
     useEffect(() => {
-        loadUsers();
-    }, []);
+        if (isAdmin) loadUsers();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isAdmin]);
 
     // Filter users based on search query
     useEffect(() => {
@@ -32,9 +33,10 @@ export const UserManagementDashboard: React.FC = () => {
             setFilteredUsers(
                 users.filter(
                     (user) =>
-                        user.name.toLowerCase().includes(query) ||
-                        user.email.toLowerCase().includes(query) ||
-                        user.role.toLowerCase().includes(query)
+                        (user.name || '').toLowerCase().includes(query) ||
+                        (user.username || '').toLowerCase().includes(query) ||
+                        (user.email || '').toLowerCase().includes(query) ||
+                        (user.role || '').toLowerCase().includes(query)
                 )
             );
         }
@@ -42,11 +44,13 @@ export const UserManagementDashboard: React.FC = () => {
 
     const loadUsers = async () => {
         setLoading(true);
+        setLoadError(null);
         try {
             const data = await userService.fetchUsers();
             setUsers(data);
         } catch (error) {
             console.error('Failed to load users:', error);
+            setLoadError(describeUserApiError(error, 'Kullanıcı listesi yüklenemedi.'));
         } finally {
             setLoading(false);
         }
@@ -62,10 +66,21 @@ export const UserManagementDashboard: React.FC = () => {
         setIsAddEditModalOpen(true);
     };
 
-    const handleSaveUser = async (userData: Partial<User>) => {
+    const handleSaveUser = async (userData: UserSavePayload) => {
+        setActionError(null);
         if (selectedUser) {
             // Update existing user
             await userService.updateUser(selectedUser.id, userData);
+            if (currentUser && selectedUser.id === currentUser.id) {
+                // The server binds every token to the password hash, so changing your own password
+                // ends this session: go to the login screen with an explanation instead of a silent 401.
+                if (userData.password) {
+                    endSession('password-changed');
+                    return;
+                }
+                // Editing your own account may change your name or role: reload the session profile.
+                if ((await refreshUser()) === 'invalid') return;
+            }
         } else {
             // Create new user
             await userService.createUser(userData);
@@ -74,107 +89,121 @@ export const UserManagementDashboard: React.FC = () => {
     };
 
     const handleDeleteUser = async (userId: string) => {
-        if (confirm('Are you sure you want to delete this user?')) {
-            try {
-                await userService.deleteUser(userId);
-                await loadUsers();
-            } catch (error) {
-                console.error('Failed to delete user:', error);
-            }
-        }
-    };
+        const target = users.find((u) => u.id === userId);
+        const label = target ? ` (${target.name || target.username})` : '';
+        const confirmed = typeof window !== 'undefined'
+            && window.confirm(`Bu kullanıcıyı${label} silmek istediğinize emin misiniz? Bu işlem geri alınamaz.`);
+        if (!confirmed) return;
 
-    const handleViewActivity = async (userId: string) => {
-        const user = users.find((u) => u.id === userId);
-        if (!user) return;
-
+        setActionError(null);
         try {
-            const activities = await userService.fetchUserActivity(userId);
-            setUserActivities(activities);
-            setActivityModalUser({ id: userId, name: user.name });
+            await userService.deleteUser(userId);
+            await loadUsers();
         } catch (error) {
-            console.error('Failed to load user activity:', error);
+            console.error('Failed to delete user:', error);
+            setActionError(describeUserApiError(error, 'Kullanıcı silinemedi.'));
         }
     };
+
+    if (!isAdmin) {
+        return (
+            <div className="flex h-full min-h-[120px] w-full flex-1 items-center justify-center gap-2 bg-surface px-3 text-center text-xs text-muted">
+                <ShieldOff size={14} className="shrink-0" aria-hidden="true" />
+                <p>Bu sayfayı yalnızca yöneticiler görüntüleyebilir.</p>
+            </div>
+        );
+    }
 
     return (
-        <div className="flex flex-col gap-6 h-full">
+        <section className="flex h-full min-h-0 w-full flex-1 flex-col bg-surface">
             {/* Header */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div>
-                    <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-blue-400 bg-clip-text text-transparent">
+            <header className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+                <div className="flex min-w-0 items-baseline gap-2">
+                    <h1 className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-secondary">
                         User Management
                     </h1>
-                    <p className="text-sm text-gray-400 mt-1">Manage users, roles, and permissions</p>
+                    <p className="hidden truncate text-[11px] text-muted md:block">Manage users, roles, and permissions</p>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex shrink-0 items-center gap-1">
                     <button
                         onClick={loadUsers}
-                        className="p-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg transition-colors text-gray-400 hover:text-white"
+                        className="grid h-6 w-6 place-items-center rounded-sm text-secondary transition-colors hover:bg-surface-secondary hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
                         title="Refresh"
                     >
-                        <RefreshCw size={18} />
+                        <RefreshCw size={14} />
                     </button>
                     <button
                         onClick={handleAddUser}
-                        className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-purple-500 to-blue-500 hover:from-purple-600 hover:to-blue-600 rounded-lg font-medium text-white transition-all"
+                        className="flex h-6 items-center gap-1.5 rounded-sm bg-primary px-2 text-[11px] font-medium text-primary-contrast transition-colors hover:opacity-90 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
                     >
-                        <UserPlus size={18} />
+                        <UserPlus size={12} />
                         Add User
                     </button>
                 </div>
-            </div>
+            </header>
 
-            {/* Stats Cards */}
+            {/* Stats */}
             <UserStatsCards users={users} />
 
+            {/* Errors from delete actions or a failed refresh while data is already shown */}
+            {(actionError || (loadError && users.length > 0)) && (
+                <div role="alert" className="flex shrink-0 items-start gap-2 border-b border-border bg-danger-soft px-3 py-1.5 text-[11px] text-danger">
+                    <AlertCircle size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
+                    <span>{actionError || loadError}</span>
+                </div>
+            )}
+
             {/* Search Bar */}
-            <div className="relative">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-                <input
-                    type="text"
-                    placeholder="Search users by name, email, or role..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg pl-12 pr-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                />
+            <div className="flex shrink-0 items-center border-b border-border px-3 py-1">
+                <div className="relative w-full sm:max-w-sm">
+                    <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted" size={12} />
+                    <input
+                        type="text"
+                        placeholder="Search users by name, email, or role..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="h-7 w-full rounded-sm border border-border bg-surface-secondary pl-7 pr-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary"
+                    />
+                </div>
             </div>
 
             {/* User Table */}
-            <div className="flex-1 bg-white/5 border border-white/10 rounded-xl overflow-hidden backdrop-blur-sm">
+            <div className="min-h-0 flex-1 overflow-auto">
                 {loading ? (
-                    <div className="flex items-center justify-center h-64">
-                        <RefreshCw className="animate-spin text-purple-400" size={32} />
+                    <div className="flex h-full min-h-[96px] items-center justify-center">
+                        <RefreshCw className="animate-spin text-muted" size={14} />
+                    </div>
+                ) : loadError && users.length === 0 ? (
+                    <div role="alert" className="flex h-full min-h-[96px] flex-col items-center justify-center gap-2 px-3 text-center">
+                        <p className="flex items-center gap-2 text-xs text-danger">
+                            <AlertCircle size={14} className="shrink-0" aria-hidden="true" />
+                            {loadError}
+                        </p>
+                        <button
+                            onClick={loadUsers}
+                            className="h-7 rounded-sm border border-border bg-surface-secondary px-2.5 text-xs font-medium text-text transition-colors hover:bg-surface-highlight focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
+                        >
+                            Tekrar dene
+                        </button>
                     </div>
                 ) : (
                     <UserTable
                         users={filteredUsers}
                         onEdit={handleEditUser}
                         onDelete={handleDeleteUser}
-                        onViewActivity={handleViewActivity}
                     />
                 )}
             </div>
 
             {/* Modals */}
-            <AnimatePresence>
-                {isAddEditModalOpen && (
-                    <AddEditUserModal
-                        user={selectedUser}
-                        onClose={() => setIsAddEditModalOpen(false)}
-                        onSave={handleSaveUser}
-                    />
-                )}
-
-                {activityModalUser && (
-                    <UserActivityModal
-                        userId={activityModalUser.id}
-                        userName={activityModalUser.name}
-                        activities={userActivities}
-                        onClose={() => setActivityModalUser(null)}
-                    />
-                )}
-            </AnimatePresence>
-        </div>
+            {isAddEditModalOpen && (
+                <AddEditUserModal
+                    user={selectedUser}
+                    isSelf={!!currentUser && !!selectedUser && selectedUser.id === currentUser.id}
+                    onClose={() => setIsAddEditModalOpen(false)}
+                    onSave={handleSaveUser}
+                />
+            )}
+        </section>
     );
 };

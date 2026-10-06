@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { useUser } from '../context/UserContext';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { FuturesTicker, Ticker } from '../types';
-import { fetchOpenInterest, startOpenInterestPoller, OpenInterestData } from '../services/marketData';
-import { anomalyDetector, Anomaly, FundingAnalyzer } from '../utils/AnomalyLogic';
-import { Radar, Zap, Link2Off, TrendingUp, AlertTriangle, Activity } from 'lucide-react';
+import { anomalyDetector, FundingAnalyzer } from '../utils/AnomalyLogic';
+import { getCryptoPerpSymbols } from '../services/marketData';
+import { DEFAULT_FUNDING_INTERVAL_HOURS, toEightHourFundingRate, formatTime } from '../utils/formatters';
+import { useFundingIntervals, getFundingIntervalHours } from './FundingRates';
+import { Link2Off, TrendingUp, TrendingDown, Activity } from 'lucide-react';
 
 interface AnomalyRadarProps {
     data: Record<string, FuturesTicker>;
@@ -11,182 +12,281 @@ interface AnomalyRadarProps {
     fundingHistory: Record<string, { time: number, rate: number }[]>;
 }
 
+// --- Shared crypto-perp universe -------------------------------------------------------------
+// TRADING + PERPETUAL USDT crypto contracts (services/marketData keeps the list for an hour).
+// `symbols` stays null until the list has loaded; futures-based work is skipped until then.
+const PERP_LIST_REFRESH_MS = 60 * 60 * 1000;
+const PERP_LIST_RETRY_MS = 60 * 1000;
+
+export const useCryptoPerpSymbols = (): { symbols: Set<string> | null; failed: boolean } => {
+    const [state, setState] = useState<{ symbols: Set<string> | null; failed: boolean }>({ symbols: null, failed: false });
+
+    useEffect(() => {
+        let disposed = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+
+        const load = () => {
+            getCryptoPerpSymbols()
+                .then(symbols => {
+                    if (disposed) return;
+                    const usable = symbols instanceof Set && symbols.size > 0;
+                    setState(prev => {
+                        if (!usable) return prev.failed ? prev : { symbols: prev.symbols, failed: true };
+                        return prev.symbols === symbols && !prev.failed ? prev : { symbols, failed: false };
+                    });
+                    timer = setTimeout(load, usable ? PERP_LIST_REFRESH_MS : PERP_LIST_RETRY_MS);
+                })
+                .catch(() => {
+                    if (disposed) return;
+                    setState(prev => (prev.failed ? prev : { symbols: prev.symbols, failed: true }));
+                    timer = setTimeout(load, PERP_LIST_RETRY_MS);
+                });
+        };
+
+        load();
+        return () => {
+            disposed = true;
+            if (timer) clearTimeout(timer);
+        };
+    }, []);
+
+    return state;
+};
+
+// --- Radar rows ------------------------------------------------------------------------------
+// Every row states what was measured. The cards group rows by the condition that holds right now.
+type RadarGroup = 'DECOUPLING' | 'NEG_FUNDING' | 'RELATIVE_RISE' | 'FUNDING_RISING';
+
+interface RadarItem {
+    id: string;          // stable across scans: condition + symbol
+    symbol: string;
+    group: RadarGroup;
+    severity: 'LOW' | 'MEDIUM' | 'HIGH';
+    description: string;
+    timestamp: number;   // first time the condition was seen in this session
+    priceChange?: number; // 24h, percent
+}
+
+const signedPct = (value: number, digits = 2) => `${value > 0 ? '+' : value < 0 ? '−' : ''}%${Math.abs(value).toFixed(digits)}`;
+
+// --- Helper UI Components (module scope so the panels are not re-created / remounted on every render) ---
+
+const AnomalyPanel: React.FC<{ title: string; rule: string; icon: any; items: RadarItem[]; emptyText: string }> = ({ title, rule, icon: Icon, items, emptyText }) => (
+    <section className="flex min-h-0 min-w-0 flex-col bg-surface">
+        <header className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-3" title={rule}>
+            <Icon size={13} className="shrink-0 text-secondary" />
+            <h2 className="truncate text-[11px] font-semibold uppercase tracking-wider text-secondary">{title}</h2>
+            <span className="ml-auto shrink-0 rounded-sm bg-surface-secondary px-1.5 py-0.5 font-mono text-[10px] font-semibold text-secondary">{items.length}</span>
+        </header>
+
+        <div className="max-h-[360px] min-h-[72px] flex-1 overflow-y-auto lg:max-h-none lg:min-h-0">
+            {items.length === 0 ? (
+                <div className="flex h-full min-h-[72px] items-center justify-center gap-1.5 px-3 text-center text-xs text-muted">
+                    <Activity size={14} className="shrink-0" />
+                    {emptyText}
+                </div>
+            ) : (
+                items.map(item => (
+                    <div
+                        key={item.id}
+                        className="border-b border-border px-3 py-1.5 text-xs hover:bg-surface-secondary"
+                        style={{ boxShadow: `inset 2px 0 0 var(${item.severity === 'HIGH' ? '--color-danger' : '--color-warning'})` }}
+                    >
+                        <div className="flex items-center gap-1.5">
+                            <span className="truncate font-medium text-text">{item.symbol.replace('USDT', '')}</span>
+                            {item.priceChange !== undefined && Number.isFinite(item.priceChange) && item.priceChange !== 0 && (
+                                <span
+                                    className={`shrink-0 rounded-sm px-1 py-0.5 font-mono text-[10px] leading-none ${item.priceChange > 0 ? 'bg-success-soft text-success' : 'bg-danger-soft text-danger'}`}
+                                    title="Spot fiyatın 24 saatlik değişimi"
+                                >
+                                    24s {item.priceChange > 0 ? '+' : ''}{item.priceChange.toFixed(2)}%
+                                </span>
+                            )}
+                            <span className="ml-auto shrink-0 font-mono text-[10px] text-muted" title="Koşulun bu oturumda ilk görüldüğü saat">
+                                {formatTime(item.timestamp, false)}
+                            </span>
+                        </div>
+                        <p className="mt-0.5 text-[11px] leading-snug text-secondary">{item.description}</p>
+                    </div>
+                ))
+            )}
+        </div>
+    </section>
+);
+
 export const AnomalyRadar: React.FC<AnomalyRadarProps> = ({ data, spotData, fundingHistory }) => {
-    const { theme } = useUser();
-    const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
-    const [oiData, setOiData] = useState<Record<string, number>>({});
-    const [lastScanTime, setLastScanTime] = useState<number>(Date.now());
+    const fundingIntervals = useFundingIntervals();
+    const { symbols: perpSymbols, failed: perpListFailed } = useCryptoPerpSymbols();
+    const [scan, setScan] = useState<{ items: RadarItem[]; time: number | null; scanned: number }>(() => ({ items: [], time: null, scanned: 0 }));
 
-    // Effect: Initialize Poller for top volume assets
+    // Stable key -> first time the condition was seen (so keys and the shown time do not change every scan)
+    const firstSeenRef = useRef<Map<string, number>>(new Map());
+
+    // Effect: run the detection loop over spot pairs that also trade as a crypto perpetual
     useEffect(() => {
-        // Get top 20 symbols by volume to poll for OI
-        const topSymbols = (Object.values(spotData) as Ticker[])
-            .sort((a, b) => b.volume - a.volume)
-            .slice(0, 30)
-            .map(t => t.symbol);
-
-        if (topSymbols.length === 0) return;
-
-        const stopPoller = startOpenInterestPoller(topSymbols, (updates) => {
-            setOiData(prev => {
-                const next = { ...prev };
-                updates.forEach(u => next[u.symbol] = u.openInterest);
-                return next;
-            });
-            setLastScanTime(Date.now());
-        });
-
-        return () => stopPoller();
-    }, []); // Run once on mount (or when spotData loads initially? No, we need stable list. Better to run once)
-
-    // Effect: Run Anomaly Detection Loop
-    useEffect(() => {
+        if (!perpSymbols) return; // contract list not loaded yet: no futures work
         if (Object.keys(data).length === 0 || Object.keys(spotData).length === 0) return;
 
-        const btcSymbol = 'BTCUSDT';
-        const btcTicker = spotData[btcSymbol];
+        const btcTicker = spotData['BTCUSDT'];
         if (!btcTicker) return;
 
-        const detected: Anomaly[] = [];
+        const now = Date.now();
+        const previousSeen = firstSeenRef.current;
+        const seen = new Map<string, number>();
+        const detected: RadarItem[] = [];
+        let scanned = 0;
+
+        const add = (item: Omit<RadarItem, 'id' | 'timestamp'>, variant = '') => {
+            const id = `${item.group}:${item.symbol}${variant ? `:${variant}` : ''}`;
+            const firstSeen = previousSeen.get(id) ?? now;
+            seen.set(id, firstSeen);
+            detected.push({ ...item, id, timestamp: firstSeen });
+        };
+
+        const btcChange = btcTicker.priceChangePercent;
+        // Funding intervals (1h / 4h / 8h) come from GET /fapi/v1/fundingInfo. Until that list has
+        // loaded the 8h-equivalent rate of most contracts would be off by 2x, so funding rows wait.
+        const intervalsLoaded = Object.keys(fundingIntervals).length > 0;
 
         (Object.values(spotData) as Ticker[]).forEach(spot => {
+            if (!perpSymbols.has(spot.symbol)) return;
             const futures = data[spot.symbol];
-            if (!futures) return; // Need both for some checks
+            if (!futures) return;
+            scanned++;
 
-            // 1. Check Decoupling
+            const base = spot.symbol.replace('USDT', '');
+            const coinChange = spot.priceChangePercent;
+
+            // 1. Moving against BTC over 24h
             const decoupling = anomalyDetector.detectDecoupling(spot, btcTicker);
-            if (decoupling) detected.push(decoupling);
+            if (decoupling) {
+                add({
+                    symbol: spot.symbol,
+                    group: 'DECOUPLING',
+                    severity: decoupling.severity,
+                    description: `24s değişim: BTC ${signedPct(btcChange)}, ${base} ${signedPct(coinChange)}`,
+                    priceChange: coinChange
+                }, coinChange > 0 ? 'up' : 'down');
+            }
 
-            // 2. Check Funding Arbitrage
-            const arbitrage = anomalyDetector.detectFundingArbitrage(futures, spot);
-            if (arbitrage) detected.push(arbitrage);
+            // 2. Negative funding while the price is up over 24h. The rate is compared as an
+            //    8h-equivalent (contracts settle every 1h / 4h / 8h).
+            const intervalHours = getFundingIntervalHours(fundingIntervals, futures.symbol);
+            const funding8h = toEightHourFundingRate(futures.fundingRate, intervalHours);
+            const intervalNote = intervalHours !== DEFAULT_FUNDING_INTERVAL_HOURS ? ` · ${intervalHours} sa aralık` : '';
+            const negativeFunding = intervalsLoaded ? anomalyDetector.detectFundingArbitrage({ ...futures, fundingRate: funding8h }, spot) : null;
+            if (negativeFunding) {
+                add({
+                    symbol: spot.symbol,
+                    group: 'NEG_FUNDING',
+                    severity: negativeFunding.severity,
+                    description: `Fonlama ${signedPct(funding8h * 100, 4)} (8s eşdeğeri) · 24s fiyat ${signedPct(coinChange)}${intervalNote}`,
+                    priceChange: coinChange
+                }, 'level');
+            }
 
-            // 3. Check PUMP Detection (Volume + Price)
-            // Use priceChangePercent which is already calculated by Binance for 24h
-            const pump = anomalyDetector.detectPump(spot);
-            if (pump) detected.push(pump);
+            // 3. 24h rise well above BTC's
+            const rise = anomalyDetector.detectPump(spot, btcTicker);
+            if (rise) {
+                const aboveBtc = coinChange - (Number.isFinite(btcChange) ? btcChange : 0);
+                add({
+                    symbol: spot.symbol,
+                    group: 'RELATIVE_RISE',
+                    severity: rise.severity,
+                    description: `BTC'den ${aboveBtc.toFixed(1)} puan fazla (BTC ${signedPct(btcChange)}) · 24s hacim $${(spot.volume / 1_000_000).toFixed(1)}M`,
+                    priceChange: coinChange
+                });
+            }
 
-            // 4. Check Funding Trends (from History)
+            // 4. Funding slope over the last hour (8h-equivalent, from the session history)
             const history = fundingHistory[spot.symbol];
-            if (history && history.length > 5) {
-                const trend = FundingAnalyzer.analyze(spot.symbol, history);
+            if (intervalsLoaded && history && history.length > 5) {
+                const normalizedHistory = intervalHours === DEFAULT_FUNDING_INTERVAL_HOURS
+                    ? history
+                    : history.map(p => ({ time: p.time, rate: toEightHourFundingRate(p.rate, intervalHours) }));
+                const trend = FundingAnalyzer.analyze(spot.symbol, normalizedHistory);
                 if (trend.direction !== 'STABLE') {
-                    detected.push({
-                        id: `fund-trend-${spot.symbol}-${Date.now()}`,
+                    const falling = trend.direction === 'DIVING';
+                    add({
                         symbol: spot.symbol,
-                        type: 'FUNDING_ARBITRAGE', // Reusing type or could add new
+                        group: falling ? 'NEG_FUNDING' : 'FUNDING_RISING',
                         severity: trend.intensity > 70 ? 'HIGH' : 'MEDIUM',
-                        score: trend.intensity,
-                        description: `${trend.direction}: Funding moving at ${trend.velocity.toFixed(5)}/hr`,
-                        timestamp: Date.now(),
-                        metrics: { fundingRate: trend.currentRate }
-                    });
+                        description: `Fonlama ${falling ? 'düşüyor' : 'yükseliyor'}: saatte ${signedPct(trend.velocity * 100, 3)} (son 1 saatin eğimi, 8s eşdeğeri)${intervalNote}`
+                    }, 'slope');
                 }
             }
         });
 
-        // Dedup and set (Keep existing ones if they haven't expired, or just replace? Let's replace for freshness)
-        setAnomalies(detected);
+        firstSeenRef.current = seen;
+        setScan({ items: detected, time: now, scanned });
 
-    }, [data, spotData, oiData]); // Re-run when data updates
+    }, [data, spotData, fundingHistory, fundingIntervals, perpSymbols]); // Re-run when data updates
 
-    // Group anomalies by type for UI
-    const groupedAnomalies = useMemo(() => {
-        return {
-            decoupling: anomalies.filter(a => a.type === 'DECOUPLING'),
-            squeeze: anomalies.filter(a => a.type === 'FUNDING_ARBITRAGE'),
-            pump: anomalies.filter(a => a.type === 'PUMP_DETECTED'),
-        };
-    }, [anomalies]);
+    // Group rows by condition for the cards
+    const grouped = useMemo(() => ({
+        decoupling: scan.items.filter(a => a.group === 'DECOUPLING'),
+        negFunding: scan.items.filter(a => a.group === 'NEG_FUNDING'),
+        relativeRise: scan.items.filter(a => a.group === 'RELATIVE_RISE'),
+        fundingRising: scan.items.filter(a => a.group === 'FUNDING_RISING'),
+    }), [scan.items]);
 
-    // --- Helper UI Components ---
-
-    const AnomalyCard = ({ title, icon: Icon, items, colorClass }: { title: string, icon: any, items: Anomaly[], colorClass: string }) => (
-        <div className={`p-4 rounded-xl border flex flex-col h-full transition-all duration-300 ${theme === 'corporate' ? 'bg-white border-gray-200 shadow-sm'
-            : theme === 'labs' ? 'bg-white border-[#DADCE0] shadow-sm rounded-[32px]'
-                : 'bg-[#161A1E] border-white/5'
-            }`}>
-            <div className={`flex items-center gap-2 mb-4 pb-2 ${theme === 'labs' ? 'border-b-0' : 'border-b border-white/5'}`}>
-                <div className={`p-2 rounded-lg bg-opacity-10 ${theme === 'labs' ? 'rounded-xl' : ''} ${colorClass.replace('text-', 'bg-')}`}>
-                    <Icon size={18} className={colorClass} />
-                </div>
-                <h3 className={`font-bold ${theme === 'corporate' || theme === 'labs' ? 'text-gray-800' : 'text-gray-200'}`}>{title}</h3>
-                <span className={`ml-auto text-xs font-mono px-2 py-0.5 rounded-full ${theme === 'corporate' || theme === 'labs' ? 'bg-gray-100 text-gray-600' : 'bg-white/10'}`}>{items.length}</span>
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-2 max-h-[600px] scrollbar-hide">
-                {items.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-full text-gray-500 text-xs py-8 opacity-50">
-                        <Activity size={24} className="mb-2" />
-                        Scanning...
-                    </div>
-                ) : (
-                    items.map(item => (
-                        <div key={item.id} className={`p-2 rounded border text-[10px] relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer ${theme === 'corporate' ? 'bg-gray-50 border-gray-100'
-                            : theme === 'labs' ? 'bg-gray-50 border-transparent hover:bg-blue-50/50 hover:border-blue-100 rounded-[16px]'
-                                : 'bg-black/20 border-white/5'
-                            }`}>
-                            <div className={`absolute left-0 top-0 bottom-0 w-1 ${item.severity === 'HIGH' ? 'bg-red-500' : 'bg-yellow-500'} ${theme === 'labs' ? 'rounded-l-lg' : ''}`} />
-
-                            <div className="flex items-center justify-between mb-1 pl-2">
-                                <span className={`font-bold text-xs ${theme === 'labs' ? 'text-gray-900' : ''}`}>{item.symbol.replace('USDT', '')}</span>
-                                <span className={`text-[9px] px-1 py-0.5 rounded ${theme === 'corporate' || theme === 'labs' ? 'bg-gray-200 text-gray-600' : 'bg-white/10'}`}>
-                                    {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                </span>
-                            </div>
-                            <p className={`pl-2 opacity-70 mb-1.5 leading-relaxed text-[10px] ${theme === 'labs' ? 'text-gray-600' : ''}`}>{item.description}</p>
-
-                            <div className="pl-2 flex gap-1.5">
-                                {item.metrics.priceChange && (
-                                    <span className={`px-1 py-0.5 rounded text-[9px] font-mono ${item.metrics.priceChange > 0 ? (theme === 'labs' ? 'text-green-600 bg-green-100' : 'text-green-400 bg-green-400/10') : (theme === 'labs' ? 'text-red-600 bg-red-100' : 'text-red-400 bg-red-400/10')}`}>
-                                        Price: {item.metrics.priceChange > 0 ? '+' : ''}{item.metrics.priceChange.toFixed(2)}%
-                                    </span>
-                                )}
-                                {item.metrics.oiChange && (
-                                    <span className={`px-1 py-0.5 rounded text-[9px] font-mono ${theme === 'labs' ? 'text-amber-600 bg-amber-100' : 'text-amber-400 bg-amber-400/10'}`}>
-                                        OI: +{item.metrics.oiChange.toFixed(2)}%
-                                    </span>
-                                )}
-                            </div>
-                        </div>
-                    ))
-                )}
-            </div>
-        </div>
-    );
+    // Honest empty state: say why a card is empty
+    const emptyText = !perpSymbols
+        ? (perpListFailed ? 'Kontrat listesi alınamadı, yeniden denenecek' : 'Kontrat listesi yükleniyor…')
+        : scan.time === null
+            ? 'Piyasa verisi bekleniyor…'
+            : 'Şu an koşulu sağlayan yok';
 
     return (
-        <div className={`grid grid-cols-1 md:grid-cols-3 gap-4 h-full p-4 overflow-y-auto ${theme === 'corporate' ? 'bg-[#FAFBFC]' : theme === 'labs' ? 'bg-[#F0F2F5]' : 'bg-[#0b0e11]'}`}>
+        <div lang="tr" className="flex min-h-full w-full flex-1 flex-col gap-px bg-border lg:h-full lg:min-h-0">
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-px md:grid-cols-2 lg:grid-rows-2 xl:grid-cols-4 xl:grid-rows-1">
 
-            {/* 1. Correlation Decoupling */}
-            <AnomalyCard
-                title="Decoupling (Asiler)"
-                icon={Link2Off}
-                items={groupedAnomalies.decoupling}
-                colorClass="text-purple-400"
-            />
+                {/* 1. Moving against BTC */}
+                <AnomalyPanel
+                    title="BTC'den ayrışan"
+                    rule="BTC 24 saatte %0.8'den fazla düşmüşken coin %1.5'ten fazla yükselmiş, ya da BTC %0.8'den fazla yükselmişken coin %1.5'ten fazla düşmüş."
+                    icon={Link2Off}
+                    items={grouped.decoupling}
+                    emptyText={emptyText}
+                />
 
-            {/* 2. Funding Squeeze */}
-            <AnomalyCard
-                title="Short Squeeze Alert"
-                icon={Zap}
-                items={groupedAnomalies.squeeze}
-                colorClass="text-emerald-400"
-            />
+                {/* 2. Negative / falling funding */}
+                <AnomalyPanel
+                    title="Negatif / düşen fonlama"
+                    rule="8 saatlik eşdeğer fonlama −%0.01'in altında ve 24 saatlik fiyat +%3'ün üstünde; ya da fonlama son 1 saatte saatte %0.05'ten hızlı düşüyor (en az 30 dakikalık oturum verisiyle)."
+                    icon={TrendingDown}
+                    items={grouped.negFunding}
+                    emptyText={emptyText}
+                />
 
-            {/* 3. PUMP Detection */}
-            <AnomalyCard
-                title="PUMP Detection"
-                icon={TrendingUp}
-                items={groupedAnomalies.pump}
-                colorClass="text-emerald-400"
-            />
+                {/* 3. 24h rise relative to BTC */}
+                <AnomalyPanel
+                    title="24s yükseliş (BTC'ye göre)"
+                    rule="24 saatlik hacmi en az 1 milyon USDT olan coin, 24 saatte en az %6 ve BTC'den en az 6 puan fazla yükselmiş."
+                    icon={TrendingUp}
+                    items={grouped.relativeRise}
+                    emptyText={emptyText}
+                />
+
+                {/* 4. Rising funding */}
+                <AnomalyPanel
+                    title="Fonlama yükseliyor"
+                    rule="8 saatlik eşdeğer fonlama son 1 saatte saatte %0.05'ten hızlı yükseliyor (en az 30 dakikalık oturum verisiyle)."
+                    icon={Activity}
+                    items={grouped.fundingRising}
+                    emptyText={emptyText}
+                />
+            </div>
 
             {/* Footer / Status Area */}
-            <div className="md:col-span-3 flex items-center justify-between p-2 opacity-50 text-[10px]">
-                <span>Fidelio Anomaly Engine v1.0 running</span>
-                <span>Last Scan: {new Date(lastScanTime).toLocaleTimeString()}</span>
-            </div>
+            <footer className="flex h-6 shrink-0 items-center justify-between gap-2 bg-surface px-3 text-[10px] text-muted">
+                <span className="truncate">
+                    {perpSymbols && scan.time !== null
+                        ? `${scan.scanned} coin tarandı (spot paritesi olan kripto perp kontratları)`
+                        : 'Tarama başlamadı'}
+                </span>
+                <span className="shrink-0 font-mono">Son tarama: {scan.time === null ? '--:--' : formatTime(scan.time)}</span>
+            </footer>
         </div>
     );
 };

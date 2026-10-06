@@ -4,22 +4,28 @@ import {
     Cell, PieChart, Pie
 } from 'recharts';
 import { Trade } from './types';
-import { Crosshair, Calendar, Clock, ArrowUpCircle, ArrowDownCircle, Activity, Target, Zap } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { PerformanceHeatmap } from './PerformanceHeatmap';
+import { formatSignedUsd, getClosedTrades, getSignedPnl, parseTradeDate } from './tradeMath';
+import { chartColors, emptyLine, fieldLabel, menuSurface, panelHeader, panelTitle } from './styles';
 
 interface AnalyticsViewProps {
     trades: Trade[];
 }
 
-const AnalyticsView: React.FC<AnalyticsViewProps> = ({ trades }) => {
+const AXIS_TICK = { fill: chartColors.axis, fontSize: 10 };
+
+const AnalyticsView: React.FC<AnalyticsViewProps> = ({ trades: allTrades }) => {
+    // Only closed trades have an outcome / realised P&L.
+    const trades = useMemo(() => getClosedTrades(allTrades), [allTrades]);
+
     // --- 1. Stats by Setup ---
     const setupStats = useMemo(() => {
         const stats: Record<string, { pnl: number; wins: number; total: number }> = {};
         trades.forEach(t => {
             t.setups.forEach(setup => {
                 if (!stats[setup]) stats[setup] = { pnl: 0, wins: 0, total: 0 };
-                const val = t.status === 'WIN' ? t.returnVal : -t.returnVal;
+                const val = getSignedPnl(t);
                 stats[setup].pnl += val;
                 stats[setup].total += 1;
                 if (t.status === 'WIN') stats[setup].wins += 1;
@@ -41,9 +47,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ trades }) => {
         const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const stats = days.map(d => ({ name: d, pnl: 0, wins: 0, total: 0 }));
         trades.forEach(t => {
-            const date = new Date(t.date);
+            const date = parseTradeDate(t.date);
             const dayIdx = date.getDay();
-            const val = t.status === 'WIN' ? t.returnVal : -t.returnVal;
+            if (Number.isNaN(dayIdx)) return;
+            const val = getSignedPnl(t);
             stats[dayIdx].pnl += val;
             stats[dayIdx].total += 1;
             if (t.status === 'WIN') stats[dayIdx].wins += 1;
@@ -60,7 +67,7 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ trades }) => {
         trades.forEach(t => {
             const side = t.side as 'LONG' | 'SHORT';
             if (stats[side]) {
-                const val = t.status === 'WIN' ? t.returnVal : -t.returnVal;
+                const val = getSignedPnl(t);
                 stats[side].pnl += val;
                 stats[side].total += 1;
                 if (t.status === 'WIN') stats[side].wins += 1;
@@ -76,16 +83,14 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ trades }) => {
         if (active && payload && payload.length) {
             const data = payload[0].payload;
             return (
-                <div className="bg-gray-950/90 border border-white/10 p-4 rounded-xl shadow-2xl backdrop-blur-xl z-50">
-                    <p className="text-[9px] font-black text-gray-500 mb-2 uppercase tracking-widest">{label || data.name}</p>
-                    <div className="space-y-1">
-                        <p className={cn("text-sm font-black tabular-nums", data.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
-                            ${data.pnl.toLocaleString()}
-                        </p>
-                        {data.winRate !== undefined && (
-                            <p className="text-[10px] text-white font-black uppercase tracking-tighter">WR: {data.winRate}%</p>
-                        )}
-                    </div>
+                <div className={cn(menuSurface, 'z-50 px-2 py-1.5')}>
+                    <p className="text-[10px] uppercase tracking-wider text-muted">{label || data.name}</p>
+                    <p className={cn('font-mono text-xs font-semibold', data.pnl >= 0 ? 'text-success' : 'text-danger')}>
+                        {formatSignedUsd(data.pnl)}
+                    </p>
+                    {data.winRate !== undefined && (
+                        <p className="font-mono text-[10px] uppercase text-secondary">WR: {data.winRate}%</p>
+                    )}
                 </div>
             );
         }
@@ -93,144 +98,141 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ trades }) => {
     };
 
     return (
-        <div className="flex-1 overflow-y-auto scrollbar-hide">
-            <div className="flex items-center gap-4 mb-10">
-                <div className="w-10 h-10 rounded-xl bg-purple-500/10 flex items-center justify-center border border-purple-500/20 shadow-lg shadow-purple-500/5">
-                    <Activity size={20} className="text-purple-400" />
-                </div>
-                <div>
-                    <h2 className="text-xl font-black text-white uppercase tracking-tighter">Correlation Engine</h2>
-                    <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest mt-1">Multi-vector performance analytics</p>
-                </div>
-            </div>
-
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 pb-10">
+        <div className="flex h-full min-h-0 flex-1 flex-col overflow-y-auto bg-surface">
+            <div className="grid flex-1 grid-cols-1 grid-rows-[auto_auto_auto_1fr] gap-px bg-border xl:grid-cols-2 xl:grid-rows-[auto_auto_1fr]">
                 {/* SETUP PERFORMANCE */}
-                <div className="bg-white/[0.02] backdrop-blur-md rounded-2xl border border-white/5 p-8 group hover:border-white/10 transition-all">
-                    <div className="flex justify-between items-center mb-10">
-                        <h3 className="text-[11px] font-black text-white uppercase tracking-[0.2em] flex items-center gap-3">
-                            <Target size={14} className="text-purple-400" /> Strategy Variance
-                        </h3>
+                <section className="flex min-w-0 flex-col bg-surface">
+                    <header className={panelHeader}>
+                        <h2 className={cn(panelTitle, 'truncate')}>Strategy Variance</h2>
+                    </header>
+                    <div className="h-56 w-full p-2">
+                        {setupStats.length === 0 ? (
+                            <div className={emptyLine}>Henüz kapalı işlem yok</div>
+                        ) : (
+                            <ResponsiveContainer width="100%" height="100%">
+                                <BarChart data={setupStats} layout="vertical" margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                                    <CartesianGrid stroke={chartColors.grid} horizontal={false} />
+                                    <XAxis type="number" hide />
+                                    <YAxis
+                                        dataKey="name"
+                                        type="category"
+                                        tick={AXIS_TICK}
+                                        width={100}
+                                        axisLine={false}
+                                        tickLine={false}
+                                    />
+                                    <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: chartColors.cursor }} />
+                                    <Bar dataKey="pnl" maxBarSize={16} isAnimationActive={false}>
+                                        {setupStats.map((entry, index) => (
+                                            <Cell
+                                                key={`cell-${index}`}
+                                                fill={entry.pnl >= 0 ? chartColors.success : chartColors.danger}
+                                            />
+                                        ))}
+                                    </Bar>
+                                </BarChart>
+                            </ResponsiveContainer>
+                        )}
                     </div>
-                    <div className="h-72 w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={setupStats} layout="vertical" margin={{ left: 20 }}>
-                                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
-                                <XAxis type="number" hide />
-                                <YAxis
-                                    dataKey="name"
-                                    type="category"
-                                    tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 9, fontWeight: 800 }}
-                                    width={100}
-                                    axisLine={false}
-                                    tickLine={false}
-                                />
-                                <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(255,255,255,0.02)' }} />
-                                <Bar dataKey="pnl" radius={[0, 4, 4, 0]} barSize={24}>
-                                    {setupStats.map((entry, index) => (
-                                        <Cell
-                                            key={`cell-${index}`}
-                                            fill={entry.pnl >= 0 ? 'rgba(16, 185, 129, 0.4)' : 'rgba(244, 63, 94, 0.4)'}
-                                            className="transition-all duration-500 hover:opacity-100 opacity-70"
-                                        />
-                                    ))}
-                                </Bar>
-                            </BarChart>
-                        </ResponsiveContainer>
-                    </div>
-                </div>
+                </section>
 
                 {/* DAY OF WEEK PERFORMANCE */}
-                <div className="bg-white/[0.02] backdrop-blur-md rounded-2xl border border-white/5 p-8 group hover:border-white/10 transition-all">
-                    <div className="flex justify-between items-center mb-10">
-                        <h3 className="text-[11px] font-black text-white uppercase tracking-[0.2em] flex items-center gap-3">
-                            <Calendar size={14} className="text-purple-400" /> Temporal Drift
-                        </h3>
+                <section className="flex min-w-0 flex-col bg-surface">
+                    <header className={panelHeader}>
+                        <h2 className={cn(panelTitle, 'truncate')}>Temporal Drift</h2>
+                    </header>
+                    <div className="h-56 w-full p-2">
+                        {trades.length === 0 ? (
+                            <div className={emptyLine}>Henüz kapalı işlem yok</div>
+                        ) : (
+                            <ResponsiveContainer width="100%" height="100%">
+                                <BarChart data={dayStats} margin={{ top: 4, right: 8, bottom: 0, left: 8 }}>
+                                    <CartesianGrid stroke={chartColors.grid} vertical={false} />
+                                    <XAxis
+                                        dataKey="name"
+                                        tick={AXIS_TICK}
+                                        axisLine={false}
+                                        tickLine={false}
+                                        tickFormatter={(val) => val.slice(0, 3)}
+                                    />
+                                    <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: chartColors.cursor }} />
+                                    <Bar dataKey="pnl" maxBarSize={28} isAnimationActive={false}>
+                                        {dayStats.map((entry, index) => (
+                                            <Cell
+                                                key={`cell-${index}`}
+                                                fill={entry.pnl >= 0 ? chartColors.success : chartColors.danger}
+                                            />
+                                        ))}
+                                    </Bar>
+                                </BarChart>
+                            </ResponsiveContainer>
+                        )}
                     </div>
-                    <div className="h-72 w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={dayStats}>
-                                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                                <XAxis
-                                    dataKey="name"
-                                    tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 8, fontWeight: 800 }}
-                                    axisLine={false}
-                                    tickLine={false}
-                                    tickFormatter={(val) => val.slice(0, 3)}
-                                />
-                                <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(255,255,255,0.02)' }} />
-                                <Bar dataKey="pnl" radius={[4, 4, 0, 0]} barSize={32}>
-                                    {dayStats.map((entry, index) => (
-                                        <Cell
-                                            key={`cell-${index}`}
-                                            fill={entry.pnl >= 0 ? 'rgba(168, 85, 247, 0.4)' : 'rgba(244, 63, 94, 0.4)'}
-                                            className="transition-all duration-500 hover:opacity-100 opacity-70"
-                                        />
-                                    ))}
-                                </Bar>
-                            </BarChart>
-                        </ResponsiveContainer>
-                    </div>
-                </div>
+                </section>
 
                 {/* LONG VS SHORT */}
-                <div className="bg-white/[0.02] backdrop-blur-md rounded-2xl border border-white/5 p-8 group hover:border-white/10 transition-all flex flex-col xl:col-span-2">
-                    <div className="flex justify-between items-center mb-8">
-                        <h3 className="text-[11px] font-black text-white uppercase tracking-[0.2em] flex items-center gap-3">
-                            <Zap size={14} className="text-purple-400" /> Vector Allocation
-                        </h3>
-                    </div>
-                    <div className="flex flex-col md:flex-row gap-12 items-center">
-                        <div className="w-full md:w-1/2 h-64 relative group">
+                <section className="flex min-w-0 flex-col bg-surface xl:col-span-2">
+                    <header className={panelHeader}>
+                        <h2 className={cn(panelTitle, 'truncate')}>Vector Allocation</h2>
+                    </header>
+                    <div className="flex flex-col divide-y divide-border md:flex-row md:divide-x md:divide-y-0">
+                        <div className="relative h-40 w-full shrink-0 md:w-64">
+                            {sideStats.length === 0 && (
+                                <div aria-hidden="true" className="pointer-events-none absolute left-1/2 top-1/2 h-[136px] w-[136px] -translate-x-1/2 -translate-y-1/2 rounded-full border-[12px] border-surface-highlight" />
+                            )}
                             <ResponsiveContainer width="100%" height="100%">
                                 <PieChart>
                                     <Pie
                                         data={sideStats}
-                                        innerRadius={70}
-                                        outerRadius={90}
-                                        paddingAngle={8}
+                                        innerRadius={56}
+                                        outerRadius={68}
+                                        paddingAngle={2}
                                         dataKey="value"
                                         stroke="none"
+                                        isAnimationActive={false}
                                     >
                                         {sideStats.map((entry, index) => (
                                             <Cell
                                                 key={`cell-${index}`}
-                                                fill={entry.name === 'Long' ? 'rgba(168, 85, 247, 0.4)' : 'rgba(244, 63, 94, 0.4)'}
-                                                className="transition-all duration-500 hover:opacity-100 opacity-70"
+                                                fill={entry.name === 'Long' ? chartColors.success : chartColors.danger}
                                             />
                                         ))}
                                     </Pie>
                                     <RechartsTooltip content={<CustomTooltip />} />
                                 </PieChart>
                             </ResponsiveContainer>
-                            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                                <span className="text-[10px] text-gray-600 font-black uppercase tracking-widest">Aggregate</span>
-                                <span className="text-lg font-black text-white tracking-tighter">{trades.length} Samples</span>
+                            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                                <span className={fieldLabel}>Aggregate</span>
+                                <span className="text-xs font-semibold text-text">{trades.length} kapalı işlem</span>
                             </div>
                         </div>
 
-                        <div className="w-full md:w-1/2 grid grid-cols-2 gap-8">
+                        <div className="grid min-w-0 flex-1 grid-cols-2 divide-x divide-border">
+                            {sideStats.length === 0 && (
+                                <div className={cn(emptyLine, 'col-span-2')}>Henüz kapalı işlem yok</div>
+                            )}
                             {sideStats.map(s => (
-                                <div key={s.name} className="flex flex-col p-6 rounded-2xl bg-white/[0.01] border border-white/5 group/side hover:bg-white/[0.02] transition-all">
-                                    <div className="flex items-center gap-3 mb-3">
+                                <div key={s.name} className="flex min-w-0 flex-col justify-center gap-0.5 px-3 py-2">
+                                    <div className="flex items-center gap-1.5">
                                         <div className={cn(
-                                            "w-2 h-2 rounded-full",
-                                            s.name === 'Long' ? 'bg-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.5)]' : 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.5)]'
+                                            'h-1.5 w-1.5 shrink-0 rounded-full',
+                                            s.name === 'Long' ? 'bg-success' : 'bg-danger'
                                         )}></div>
-                                        <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest group-hover/side:text-white transition-colors">{s.name} Exposure</span>
+                                        <span className={cn(fieldLabel, 'truncate')}>{s.name} Exposure</span>
                                     </div>
-                                    <div className="text-2xl font-black text-white tabular-nums tracking-tighter mb-1">${s.pnl.toLocaleString()}</div>
-                                    <div className="text-[9px] text-gray-600 font-black uppercase tracking-widest">{s.winRate}% Efficiency</div>
+                                    <div className={cn(
+                                        'truncate font-mono text-base font-semibold leading-5',
+                                        s.pnl > 0 ? 'text-success' : s.pnl < 0 ? 'text-danger' : 'text-text'
+                                    )}>{formatSignedUsd(s.pnl)}</div>
+                                    <div className="truncate text-[10px] text-muted">{s.winRate}% Efficiency</div>
                                 </div>
                             ))}
                         </div>
                     </div>
-                </div>
-            </div>
+                </section>
 
-            {/* Performance Heatmap */}
-            <div className="pt-8 border-t border-white/5">
-                <PerformanceHeatmap trades={trades} />
+                {/* Performance Heatmap */}
+                <PerformanceHeatmap trades={trades} className="xl:col-span-2" />
             </div>
         </div>
     );

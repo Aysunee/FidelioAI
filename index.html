@@ -2,7 +2,10 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <link rel="preconnect" href="https://fapi.binance.com" crossorigin>
+    <link rel="dns-prefetch" href="https://fstream.binance.com">
+    <link rel="dns-prefetch" href="https://api.binance.com">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Fidelio">
@@ -10,12 +13,28 @@
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <title>Fidelio Screener</title>
     <link rel="manifest" href="/manifest.json">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180.png">
+    <!-- Tailwind Play CDN, pinned to an exact version so a CDN update cannot change the styles unnoticed. -->
+    <script src="https://cdn.tailwindcss.com/3.4.17"></script>
     <link rel="stylesheet" href="/index.css">
     <script>
       tailwind.config = {
         darkMode: 'class',
         theme: {
+          // Fidelio Terminal scales: sharp corners (0 / 2px / full), no blur, no decorative shadows.
+          // Overriding the whole scale means every rounded-*/shadow-*/backdrop-blur-* class follows the system.
+          borderRadius: {
+            none: '0', sm: '2px', DEFAULT: '2px', md: '2px', lg: '2px', xl: '2px', '2xl': '2px', '3xl': '2px',
+            full: '9999px', card: 'var(--radius-card)', 'sm-brand': 'var(--radius-sm)',
+          },
+          boxShadow: {
+            none: 'none', sm: 'none', DEFAULT: 'none', md: 'none', lg: 'none', inner: 'none', brand: 'none',
+            xl: 'var(--shadow-overlay)', '2xl': 'var(--shadow-overlay)', overlay: 'var(--shadow-overlay)',
+          },
+          backdropBlur: {
+            none: '0', sm: '0', DEFAULT: '0', md: '0', lg: '0', xl: '0', '2xl': '0', '3xl': '0',
+          },
           extend: {
             colors: {
               background: 'var(--bg-background)',
@@ -23,19 +42,21 @@
               'surface-secondary': 'var(--bg-surface-secondary)',
               'surface-highlight': 'var(--bg-surface-highlight)',
               border: 'var(--color-border)',
+              'border-strong': 'var(--color-border-strong)',
               primary: 'var(--color-brand)',
+              'primary-contrast': 'var(--color-brand-contrast)',
+              'primary-soft': 'var(--color-brand-soft)',
               success: 'var(--color-success)',
+              'success-soft': 'var(--color-success-soft)',
               danger: 'var(--color-danger)',
+              'danger-soft': 'var(--color-danger-soft)',
               warning: 'var(--color-warning)',
+              'warning-soft': 'var(--color-warning-soft)',
+              info: 'var(--color-info)',
+              'info-soft': 'var(--color-info-soft)',
               text: 'var(--color-text)',
               secondary: 'var(--color-text-secondary)',
-            },
-            borderRadius: {
-              'card': 'var(--radius-card)',
-              'sm-brand': 'var(--radius-sm)',
-            },
-            boxShadow: {
-              'brand': 'var(--shadow-card)',
+              muted: 'var(--color-text-muted)',
             },
             fontFamily: {
               sans: ['Inter', 'Roboto', 'system-ui', 'sans-serif'],
@@ -55,27 +76,9 @@
         }
       }
     </script>
-  <script type="importmap">
-{
-  "imports": {
-    "recharts": "https://aistudiocdn.com/recharts@^3.5.0",
-    "react-dom/client": "https://aistudiocdn.com/react-dom@^19.2.0/client",
-    "react-dom": "https://aistudiocdn.com/react-dom@^19.2.0",
-    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
-    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
-    "path": "https://aistudiocdn.com/path@^0.12.7",
-    "@vitejs/plugin-react": "https://aistudiocdn.com/@vitejs/plugin-react@^5.1.1",
-    "vite": "https://aistudiocdn.com/vite@^7.2.4"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
-</head>
+  </head>
   <body>
     <div id="root"></div>
-  <script type="module" src="/index.tsx"></script>
-</body>
+    <script type="module" src="/index.tsx"></script>
+  </body>
 </html>

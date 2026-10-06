@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import { Bell, TrendingUp, TrendingDown } from 'lucide-react';
+import React, { useState } from 'react';
 
 interface SetAlertModalProps {
   symbol: string;
@@ -19,38 +18,42 @@ export const SetAlertModal: React.FC<SetAlertModalProps> = ({ symbol, currentPri
     onSave(price, condition);
   };
 
+  const segment = 'h-6 flex-1 rounded-sm text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
+
   return (
-    <div className="space-y-6 pt-2">
-      <div className="text-center">
-         <h3 className="text-3xl font-display font-bold text-text tracking-tight">${currentPrice.toLocaleString()}</h3>
-         <p className="text-secondary text-sm font-medium">Current Price</p>
+    <div className="space-y-3">
+      <div className="flex items-baseline justify-between gap-3 border-b border-border pb-3">
+        <p className="text-[10px] font-medium uppercase tracking-wider text-muted">Current Price</p>
+        <h3 className="font-mono text-2xl font-semibold text-text">${currentPrice.toLocaleString()}</h3>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-6">
-        <div className="space-y-1">
-          <label className="text-xs font-semibold text-secondary uppercase tracking-wide ml-1">Trigger Price</label>
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <div>
+          <label htmlFor="alert-trigger-price" className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-muted">Trigger Price</label>
           <div className="relative">
-            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-text font-semibold">$</span>
+            <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-xs text-secondary">$</span>
             <input
+              id="alert-trigger-price"
               type="number"
               step="any"
               value={targetPrice}
               onChange={(e) => setTargetPrice(e.target.value)}
-              className="w-full bg-surface-secondary border-none rounded-xl px-4 pl-8 py-4 text-xl font-semibold text-text focus:ring-2 focus:ring-primary/20 transition-all outline-none"
+              className="h-7 w-full rounded-sm border border-border bg-surface-secondary pl-5 pr-2 font-mono text-xs text-text outline-none placeholder:text-muted focus:border-primary"
               autoFocus
             />
           </div>
         </div>
 
-        {/* iOS Segmented Control */}
-        <div className="bg-surface-secondary p-1 rounded-xl flex">
+        {/* Segmented control */}
+        <div className="flex rounded-sm border border-border p-0.5">
           <button
             type="button"
             onClick={() => setCondition('ABOVE')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all shadow-sm ${
+            aria-pressed={condition === 'ABOVE'}
+            className={`${segment} ${
               condition === 'ABOVE'
-                ? 'bg-surface text-text'
-                : 'bg-transparent text-secondary shadow-none hover:text-text'
+                ? 'bg-surface-highlight text-text'
+                : 'text-secondary hover:text-text'
             }`}
           >
             Above
@@ -58,19 +61,20 @@ export const SetAlertModal: React.FC<SetAlertModalProps> = ({ symbol, currentPri
           <button
             type="button"
             onClick={() => setCondition('BELOW')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all shadow-sm ${
+            aria-pressed={condition === 'BELOW'}
+            className={`${segment} ${
               condition === 'BELOW'
-                ? 'bg-surface text-text'
-                : 'bg-transparent text-secondary shadow-none hover:text-text'
+                ? 'bg-surface-highlight text-text'
+                : 'text-secondary hover:text-text'
             }`}
           >
             Below
           </button>
         </div>
 
-        <button 
+        <button
             type="submit"
-            className="w-full bg-primary hover:bg-primary/90 text-white py-4 rounded-xl text-[17px] font-semibold transition-all shadow-lg shadow-primary/20 active:scale-[0.98]"
+            className="h-7 w-full rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-contrast transition-colors hover:opacity-90 focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
         >
             Create Alert
         </button>

@@ -1,14 +1,6 @@
-import { Holding } from './types';
-
 export const DEFAULT_WATCHLIST = [
   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 
   'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'MATICUSDT'
-];
-
-export const MOCK_HOLDINGS: Holding[] = [
-  { id: '1', symbol: 'BTCUSDT', qty: 0.45, costBasis: 62000 },
-  { id: '2', symbol: 'ETHUSDT', qty: 5.2, costBasis: 3100 },
-  { id: '3', symbol: 'SOLUSDT', qty: 150, costBasis: 85 },
 ];
 
 export const STRATEGY_NAMES = [

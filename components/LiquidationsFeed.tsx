@@ -1,97 +1,66 @@
-
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import { Liquidation } from '../types';
-import { Card } from './ui/Card';
-import { Skull, Droplets, LineChart, ExternalLink } from 'lucide-react';
+import { Droplets } from 'lucide-react';
 
 interface LiquidationsFeedProps {
   liquidations: Liquidation[];
+  /** Maximum number of entries shown in the strip. */
+  limit?: number;
 }
 
-export const LiquidationsFeed: React.FC<LiquidationsFeedProps> = ({ liquidations }) => {
-  const scrollRef = useRef<HTMLDivElement>(null);
+const formatValue = (val: number) => {
+  if (val >= 1000000) return `$${(val / 1000000).toFixed(2)}M`;
+  if (val >= 1000) return `$${(val / 1000).toFixed(1)}K`;
+  return `$${val.toFixed(0)}`;
+};
 
-  // Auto-scroll to bottom like a terminal
-  useEffect(() => {
-    if (scrollRef.current) {
-        // Only auto-scroll if user is already near bottom
-        const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-        if (scrollHeight - scrollTop - clientHeight < 100) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        }
-    }
-  }, [liquidations]);
+const formatTime = (ts: number) =>
+  new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-  const formatValue = (val: number) => {
-    if (val >= 1000000) return `$${(val / 1000000).toFixed(2)}M`;
-    if (val >= 1000) return `$${(val / 1000).toFixed(1)}K`;
-    return `$${val.toFixed(0)}`;
-  };
-
-  const formatTime = (ts: number) => {
-    return new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  };
+// Compact, horizontally scrolling ticker that fills the h-8 bottom strip of the app shell
+// (the strip itself, App.tsx, owns the background and the top border).
+// Newest liquidation first (MarketContext prepends new events).
+export const LiquidationsFeed: React.FC<LiquidationsFeedProps> = ({ liquidations, limit = 30 }) => {
+  const items = liquidations.slice(0, limit);
 
   return (
-    <Card 
-        title="Live Liquidations" 
-        className="h-full"
-        action={<Droplets size={14} className="text-secondary animate-pulse" />}
-    >
-      <div className="flex flex-col h-full bg-surface">
-         {/* Header */}
-         <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-surface-secondary/50 border-b border-border text-[10px] font-bold text-secondary uppercase tracking-wider">
-            <div className="col-span-3">Time</div>
-            <div className="col-span-4">Symbol</div>
-            <div className="col-span-2">Side</div>
-            <div className="col-span-3 text-right">Value</div>
-         </div>
-
-         {/* Content */}
-         <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden p-0 scroll-smooth">
-            {liquidations.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-secondary opacity-50 gap-2 p-4">
-                    <Skull size={24} />
-                    <span className="text-xs">Watching for REKTs...</span>
-                </div>
-            ) : (
-                <div className="flex flex-col-reverse"> {/* Reverse to show newest at top logically, but we use scroll to bottom for terminal feel usually. Actually let's just map normally and scroll to top? Standard feed usually puts newest at top. Let's do newest at TOP. */}
-                     {liquidations.map((liq) => {
-                         const isLongLiq = liq.side === 'LONG';
-                         const colorClass = isLongLiq ? 'text-danger' : 'text-success';
-                         const bgClass = isLongLiq ? 'bg-danger/5 hover:bg-danger/10' : 'bg-success/5 hover:bg-success/10';
-                         const symbolBase = liq.symbol.replace('USDT', '');
-                         
-                         const tvLink = `https://www.tradingview.com/chart/?symbol=BINANCE:${liq.symbol}.P`;
-                         const binanceLink = `https://www.binance.com/en/futures/${liq.symbol}`;
-
-                         return (
-                             <div key={liq.id} className={`grid grid-cols-12 gap-2 px-4 py-2 border-b border-border/50 text-xs items-center transition-colors animate-enter group relative ${bgClass}`}>
-                                 <div className="col-span-3 font-mono text-secondary opacity-75">
-                                     {formatTime(liq.time)}
-                                 </div>
-                                 <div className="col-span-4 font-bold text-text flex items-center justify-between">
-                                     <span>{symbolBase}</span>
-                                     <div className="hidden group-hover:flex items-center gap-1 bg-surface shadow-sm rounded border border-border px-1 absolute left-20 z-10">
-                                         <a href={tvLink} target="_blank" rel="noopener noreferrer" className="p-0.5 hover:text-primary text-secondary"><LineChart size={12}/></a>
-                                         <a href={binanceLink} target="_blank" rel="noopener noreferrer" className="p-0.5 hover:text-warning text-secondary"><ExternalLink size={12}/></a>
-                                     </div>
-                                 </div>
-                                 <div className="col-span-2">
-                                     <span className={`font-bold ${colorClass}`}>
-                                         {liq.side}
-                                     </span>
-                                 </div>
-                                 <div className="col-span-3 text-right font-mono font-medium text-text">
-                                     {formatValue(liq.value)}
-                                 </div>
-                             </div>
-                         );
-                     })}
-                </div>
-            )}
-         </div>
+    <div className="flex h-full min-w-0 items-stretch" role="region" aria-label="Canlı likidasyonlar">
+      <div className="flex shrink-0 items-center gap-1.5 border-r border-border px-3 text-[10px] font-semibold uppercase tracking-wider text-secondary">
+        <Droplets size={12} />
+        <span className="hidden sm:inline" lang="tr">Likidasyonlar</span>
       </div>
-    </Card>
+
+      <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide">
+        {items.length === 0 ? (
+          <span className="flex h-full items-center whitespace-nowrap px-3 text-[11px] text-muted">Likidasyon bekleniyor…</span>
+        ) : (
+          <ul className="flex h-full items-stretch divide-x divide-border whitespace-nowrap">
+            {items.map((liq) => {
+              const isLongLiq = liq.side === 'LONG';
+              const colorClass = isLongLiq ? 'text-danger' : 'text-success';
+              const symbolBase = liq.symbol.replace('USDT', '');
+              const binanceLink = `https://www.binance.com/en/futures/${liq.symbol}`;
+
+              return (
+                <li key={liq.id} className="shrink-0">
+                  <a
+                    href={binanceLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`${liq.symbol} ${liq.side} likidasyonu: ${formatValue(liq.value)} @ ${liq.price}`}
+                    className="flex h-full items-center gap-1.5 px-2.5 font-mono text-[11px] transition-colors hover:bg-surface-secondary focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-primary"
+                  >
+                    <span className="text-muted">{formatTime(liq.time)}</span>
+                    <span className="font-semibold text-text">{symbolBase}</span>
+                    <span className={`font-semibold ${colorClass}`}>{liq.side}</span>
+                    <span className="text-text">{formatValue(liq.value)}</span>
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 };

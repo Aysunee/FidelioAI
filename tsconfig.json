@@ -16,7 +16,7 @@
     "moduleResolution": "bundler",
     "isolatedModules": true,
     "moduleDetection": "force",
-    "allowJs": true,
+    "allowJs": false,
     "jsx": "react-jsx",
     "baseUrl": ".",
     "paths": {
@@ -26,5 +26,26 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": [
+    "App.tsx",
+    "index.tsx",
+    "types.ts",
+    "constants.ts",
+    "vite.config.ts",
+    "components",
+    "context",
+    "services",
+    "utils",
+    "hooks",
+    "theme",
+    "src"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "server",
+    "fidelio_upload_v2",
+    "tradevision-pro-dashboard 2"
+  ]
 }

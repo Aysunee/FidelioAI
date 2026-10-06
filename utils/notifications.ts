@@ -12,22 +12,32 @@ interface NotificationOptions {
     tag?: string;
 }
 
+const isNotificationApiAvailable = (): boolean =>
+    typeof window !== 'undefined' && 'Notification' in window;
+
+const hasNotificationPermission = (): boolean => {
+    if (!isNotificationApiAvailable()) return false;
+    try {
+        return Notification.permission === 'granted';
+    } catch {
+        return false;
+    }
+};
+
 class NotificationManager {
     private audioContext: AudioContext | null = null;
-    private soundEnabled: boolean = true;
-    private notificationsEnabled: boolean = false;
+    // Both default to off; SignalContext syncs them from the user's saved notification settings.
+    private soundEnabled: boolean = false;
+    private browserEnabled: boolean = false;
 
-    constructor() {
-        this.checkNotificationPermission();
-        // AudioContext is initialized lazily on first user interaction/sound play
-    }
+    // The permission prompt is only shown from requestPermission(), i.e. after a user click.
+    constructor() { }
 
     async resumeAudioContext(): Promise<void> {
         const ctx = await this.getAudioContext();
         if (ctx && ctx.state === 'suspended') {
             try {
                 await ctx.resume();
-                console.log('🔊 AudioContext resumed via user gesture');
             } catch (e) {
                 console.warn('Failed to resume AudioContext:', e);
             }
@@ -60,37 +70,18 @@ class NotificationManager {
         return this.audioContext;
     }
 
-    private async checkNotificationPermission() {
-        if (typeof window !== 'undefined' && 'Notification' in window) {
-            if (Notification.permission === 'granted') {
-                this.notificationsEnabled = true;
-            } else if (Notification.permission !== 'denied') {
-                try {
-                    const permission = await Notification.requestPermission();
-                    this.notificationsEnabled = permission === 'granted';
-                } catch (e) {
-                    console.warn('Notification permission request failed:', e);
-                }
-            }
-        }
-    }
-
+    // Must be called from a user gesture (button click).
     async requestPermission(): Promise<boolean> {
-        if (typeof window !== 'undefined' && 'Notification' in window) {
-            try {
-                const permission = await Notification.requestPermission();
-                this.notificationsEnabled = permission === 'granted';
-
-                // Also try to initialize audio on user interaction
-                await this.getAudioContext();
-
-                return this.notificationsEnabled;
-            } catch (e) {
-                console.warn('Permission request failed:', e);
-                return false;
-            }
+        if (!isNotificationApiAvailable()) return false;
+        try {
+            const permission = await Notification.requestPermission();
+            // Also try to initialize audio on user interaction
+            await this.getAudioContext();
+            return permission === 'granted';
+        } catch (e) {
+            console.warn('Permission request failed:', e);
+            return false;
         }
-        return false;
     }
 
     private async playBeep(frequency: number, duration: number, volume: number = 0.3) {
@@ -128,11 +119,13 @@ class NotificationManager {
             case 'MEDIUM':
                 return { frequency: 600, duration: 0.15, count: 1 };
             case 'LOW':
+            default:
                 return { frequency: 400, duration: 0.1, count: 1 };
         }
     }
 
     private async playPrioritySound(priority: NotificationPriority) {
+        if (!this.soundEnabled) return;
         const sound = this.getSoundForPriority(priority);
 
         for (let i = 0; i < sound.count; i++) {
@@ -146,13 +139,13 @@ class NotificationManager {
     async notify(options: NotificationOptions) {
         const priority = options.priority || 'MEDIUM';
 
-        // Play sound
+        // Play sound (only when the user enabled sound alerts)
         if (options.playSound !== false) {
             await this.playPrioritySound(priority);
         }
 
-        // Show browser notification
-        if (this.notificationsEnabled && 'Notification' in window) {
+        // Show browser notification only when the user enabled it AND the browser granted permission
+        if (this.browserEnabled && hasNotificationPermission()) {
             try {
                 const notification = new Notification(options.title, {
                     body: options.body,
@@ -179,44 +172,73 @@ class NotificationManager {
 
     setSoundEnabled(enabled: boolean) {
         this.soundEnabled = enabled;
-        localStorage.setItem('fidelio_sound_enabled', enabled.toString());
+        if (typeof window === 'undefined') return;
+        try {
+            localStorage.setItem('fidelio_sound_enabled', enabled.toString());
+        } catch { /* storage unavailable */ }
+    }
+
+    setBrowserEnabled(enabled: boolean) {
+        this.browserEnabled = enabled;
     }
 
     getSoundEnabled(): boolean {
         if (typeof window !== 'undefined') {
-            const saved = localStorage.getItem('fidelio_sound_enabled');
-            return saved !== null ? saved === 'true' : true;
+            try {
+                const saved = localStorage.getItem('fidelio_sound_enabled');
+                if (saved !== null) return saved === 'true';
+            } catch { /* storage unavailable */ }
         }
         return this.soundEnabled;
     }
 
     getNotificationsEnabled(): boolean {
-        return this.notificationsEnabled;
+        return this.browserEnabled && hasNotificationPermission();
     }
 }
 
 // Singleton instance
 export const notificationManager = new NotificationManager();
 
-// Helper functions
+const baseAsset = (symbol: string) => symbol.replace('USDT', '');
+
+const formatNotificationPrice = (price: number) => {
+    if (!Number.isFinite(price)) return '—';
+    if (Math.abs(price) >= 1) return price.toLocaleString('tr-TR', { maximumFractionDigits: 2 });
+    return price.toPrecision(4);
+};
+
+// Accepts 'LOW' | 'MEDIUM' | 'HIGH' (and the legacy 'MID').
 export const notifySignal = (symbol: string, type: string, level: string, price: number) => {
-    const priority: NotificationPriority = level === 'HIGH' ? 'HIGH' : level === 'MID' ? 'MEDIUM' : 'LOW';
+    const priority: NotificationPriority =
+        level === 'HIGH' ? 'HIGH' : (level === 'MID' || level === 'MEDIUM') ? 'MEDIUM' : 'LOW';
 
     notificationManager.notify({
-        title: `🎯 ${symbol.replace('USDT', '')} Signal`,
-        body: `${type} - ${level} level at $${price.toFixed(2)}`,
+        title: `🎯 ${baseAsset(symbol)} sinyali`,
+        body: `${type} · $${formatNotificationPrice(price)}`,
         priority,
         tag: `signal-${symbol}`,
     });
 };
 
+const BIG_MOVE_TYPE_LABELS: Record<string, string> = {
+    RISE: 'Yükseliş',
+    FALL: 'Düşüş',
+    HIGH: '24s zirve',
+    LOW: '24s dip',
+    PULLBACK: 'Geri çekilme',
+    RALLY: 'Toparlanma'
+};
+
 export const notifyBigMove = (symbol: string, type: string, changePercent: number, level: string) => {
     const priority: NotificationPriority = level === 'HIGH' ? 'CRITICAL' : level === 'MID' ? 'HIGH' : 'MEDIUM';
     const emoji = type === 'RISE' ? '🚀' : type === 'FALL' ? '📉' : '⚡';
+    const label = BIG_MOVE_TYPE_LABELS[type] || type;
+    const change = Math.abs(changePercent);
 
     notificationManager.notify({
-        title: `${emoji} ${symbol.replace('USDT', '')} Big Move!`,
-        body: `${type} ${Math.abs(changePercent).toFixed(2)}% - ${level} level`,
+        title: `${emoji} ${baseAsset(symbol)} sert hareket`,
+        body: change > 0 ? `${label} %${change.toFixed(2)} · ${level} seviye` : `${label} · ${level} seviye`,
         priority,
         tag: `bigmove-${symbol}`,
     });
@@ -224,8 +246,8 @@ export const notifyBigMove = (symbol: string, type: string, changePercent: numbe
 
 export const notifyPriceAlert = (symbol: string, targetPrice: number, currentPrice: number) => {
     notificationManager.notify({
-        title: `🎯 Price Alert: ${symbol.replace('USDT', '')}`,
-        body: `Target $${targetPrice} reached! Current: $${currentPrice}`,
+        title: `🎯 Fiyat alarmı: ${baseAsset(symbol)}`,
+        body: `Hedef $${formatNotificationPrice(targetPrice)} gerçekleşti. Güncel: $${formatNotificationPrice(currentPrice)}`,
         priority: 'HIGH',
         tag: `alert-${symbol}`,
     });

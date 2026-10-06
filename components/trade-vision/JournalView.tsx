@@ -1,7 +1,9 @@
 import React, { useMemo, useState } from 'react';
-import { BookOpen, Calendar, ChevronRight, MessageSquare, Tag, Filter, Search, Activity, Target } from 'lucide-react';
+import { BookOpen, ChevronRight, MessageSquare, Search } from 'lucide-react';
 import { Trade } from './types';
 import { cn } from '@/utils/cn';
+import { formatSignedPct, formatSignedUsd, getClosedTrades, getSignedPct, getSignedPnl, parseTradeDate } from './tradeMath';
+import { badge, badgeDanger, badgeNeutral, badgeSuccess, emptyLine, inputBase, panelHeader, panelTitle } from './styles';
 
 interface JournalViewProps {
     trades: Trade[];
@@ -20,10 +22,10 @@ const JournalView: React.FC<JournalViewProps> = ({ trades, onSelectTrade }) => {
         });
 
         return Object.entries(groups)
-            .sort((a, b) => new Date(b[0]).getTime() - new Date(a[0]).getTime())
+            .sort((a, b) => parseTradeDate(b[0]).getTime() - parseTradeDate(a[0]).getTime())
             .map(([date, dayTrades]) => {
-                const dayClosedTrades = dayTrades.filter(t => t.status !== 'OPEN');
-                const dailyPnL = dayClosedTrades.reduce((acc, t) => acc + (t.status === 'WIN' ? (t.returnVal || 0) : -(t.returnVal || 0)), 0);
+                const dayClosedTrades = getClosedTrades(dayTrades);
+                const dailyPnL = dayClosedTrades.reduce((acc, t) => acc + getSignedPnl(t), 0);
                 const winCount = dayClosedTrades.filter(t => t.status === 'WIN').length;
 
                 return {
@@ -48,135 +50,115 @@ const JournalView: React.FC<JournalViewProps> = ({ trades, onSelectTrade }) => {
     }, [groupedTrades, searchTerm]);
 
     return (
-        <div className="flex-1 flex flex-col min-h-0 bg-transparent">
+        <section className="flex h-full min-h-0 flex-1 flex-col bg-surface">
             {/* Header / Search */}
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-10">
-                <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 rounded-xl bg-purple-500/10 flex items-center justify-center border border-purple-500/20 shadow-lg shadow-purple-500/5">
-                        <BookOpen size={20} className="text-purple-400" />
-                    </div>
-                    <div>
-                        <h2 className="text-xl font-black text-white uppercase tracking-tighter">Psychological Ledger</h2>
-                        <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest mt-1">Timeline of strategic execution & cognitive notes</p>
-                    </div>
-                </div>
+            <header className={panelHeader}>
+                <h2 className={cn(panelTitle, 'truncate')}>Psychological Ledger</h2>
 
-                <div className="relative group w-full md:w-80">
+                <div className="relative w-44 shrink-0 sm:w-64">
+                    <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted" />
                     <input
                         type="text"
                         placeholder="SEARCH SAMPLES / NOTES..."
+                        aria-label="Search samples / notes"
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
-                        className="w-full bg-white/[0.02] border border-white/5 rounded-2xl py-3 px-12 text-[10px] font-black uppercase tracking-[0.2em] text-white focus:outline-none focus:border-purple-500/50 transition-all placeholder:text-gray-700"
+                        className={cn(inputBase, 'h-6 pl-6 text-[11px]')}
                     />
-                    <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-700 group-focus-within:text-purple-500 transition-colors" />
                 </div>
-            </div>
+            </header>
 
-            <div className="flex-1 overflow-y-auto scrollbar-hide space-y-10 pb-10">
+            <div className="min-h-0 flex-1 overflow-y-auto">
                 {filteredGroups.map((group) => (
-                    <div key={group.date} className="relative pl-8">
-                        {/* Timeline Connector */}
-                        <div className="absolute left-[3px] top-4 bottom-[-40px] w-[2px] bg-gradient-to-b from-purple-500/30 to-transparent"></div>
-                        <div className="absolute left-0 top-6 w-2 h-2 rounded-full bg-purple-500 shadow-[0_0_10px_rgba(168,85,247,0.8)]"></div>
-
+                    <div key={group.date}>
                         {/* Group Header */}
-                        <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
-                            <div>
-                                <h3 className="text-xs font-black text-white uppercase tracking-[0.3em] flex items-center gap-3">
-                                    {group.date}
-                                    <span className="text-[9px] text-gray-600 font-medium">/ {new Date(group.date).toLocaleDateString('en-US', { weekday: 'long' }).toUpperCase()}</span>
-                                </h3>
-                            </div>
-                            <div className="flex items-center gap-6">
-                                <div className="flex flex-col items-end">
-                                    <span className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-1">Session Flux</span>
+                        <div className="sticky top-0 z-10 flex h-7 items-center justify-between gap-3 border-b border-border bg-surface-secondary px-3">
+                            <h3 className="flex min-w-0 items-baseline gap-2 font-mono text-[11px] font-semibold text-text">
+                                {group.date}
+                                <span className="truncate font-sans text-[10px] font-medium uppercase tracking-wider text-muted">{parseTradeDate(group.date).toLocaleDateString('tr-TR', { weekday: 'long' }).toLocaleUpperCase('tr-TR')}</span>
+                            </h3>
+                            <div className="flex shrink-0 items-center gap-4 text-[10px] uppercase tracking-wider text-muted">
+                                <div className="flex items-baseline gap-1.5">
+                                    <span className="hidden sm:inline">Session Flux</span>
                                     <span className={cn(
-                                        "text-sm font-black tabular-nums",
-                                        group.dailyPnL >= 0 ? 'text-purple-400' : 'text-rose-400'
+                                        'font-mono text-[11px] font-semibold',
+                                        group.dailyPnL >= 0 ? 'text-success' : 'text-danger'
                                     )}>
-                                        {group.dailyPnL >= 0 ? '+' : ''}${group.dailyPnL.toLocaleString()}
+                                        {formatSignedUsd(group.dailyPnL)}
                                     </span>
                                 </div>
-                                <div className="flex flex-col items-end">
-                                    <span className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-1">Efficiency</span>
-                                    <span className="text-sm font-bold text-white tabular-nums">{group.winRate}% <span className="text-[10px] text-gray-700 uppercase">Avg</span></span>
+                                <div className="flex items-baseline gap-1.5">
+                                    <span className="hidden sm:inline">Efficiency</span>
+                                    <span className="font-mono text-[11px] font-semibold text-text">{group.winRate}%</span>
+                                    <span>Avg</span>
                                 </div>
                             </div>
                         </div>
 
                         {/* Sample List */}
-                        <div className="grid gap-4">
-                            {group.trades.map(trade => (
-                                <div
-                                    key={trade.id}
-                                    onClick={() => onSelectTrade(trade.id)}
-                                    className="bg-white/[0.02] backdrop-blur-md border border-white/5 p-6 rounded-2xl hover:bg-white/[0.03] transition-all duration-300 group cursor-pointer flex flex-col md:flex-row gap-8 items-start md:items-center"
-                                >
-                                    {/* Asset Info */}
-                                    <div className="w-full md:w-32 shrink-0">
-                                        <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-2 flex items-center gap-2">
-                                            <Activity size={10} /> {trade.time}
-                                        </div>
-                                        <div className="text-xl font-black text-white group-hover:text-purple-400 transition-colors uppercase tracking-widest">{trade.symbol}</div>
-                                        <div className={cn(
-                                            "inline-block text-[8px] font-black px-2 py-0.5 rounded-md mt-2 uppercase tracking-widest border",
-                                            trade.side === 'LONG' ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                                        )}>{trade.side}</div>
-                                    </div>
+                        {group.trades.map(trade => (
+                            <div
+                                key={trade.id}
+                                onClick={() => onSelectTrade(trade.id)}
+                                className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-3 py-1.5 text-xs transition-colors hover:bg-surface-secondary md:h-7 md:flex-nowrap md:py-0"
+                            >
+                                {/* Asset Info */}
+                                <span className="w-10 shrink-0 font-mono text-[11px] text-muted">{trade.time}</span>
+                                <span className="w-24 shrink-0 truncate font-semibold uppercase text-text">{trade.symbol}</span>
+                                <span className={cn(
+                                    badge,
+                                    'w-12 justify-center',
+                                    trade.side === 'LONG' ? badgeSuccess : badgeDanger
+                                )}>{trade.side}</span>
 
-                                    {/* Financials */}
-                                    <div className="w-full md:w-32 shrink-0">
-                                        <div className={cn(
-                                            "text-lg font-black tabular-nums",
-                                            trade.status === 'WIN' ? 'text-emerald-400' :
-                                                trade.status === 'LOSS' ? 'text-rose-400' : 'text-cyan-400'
-                                        )}>
-                                            {trade.status === 'OPEN' ? 'ACTIVE' :
-                                                `${trade.status === 'WIN' ? '+' : '-'}$${(trade.returnVal || 0).toLocaleString()}`}
-                                        </div>
-                                        <div className="text-[10px] text-gray-600 font-black tabular-nums uppercase tracking-widest mt-1">
-                                            {trade.status === 'OPEN' ? 'PENDING SETTLE' : `${trade.returnPct}% Variance`}
-                                        </div>
-                                    </div>
+                                {/* Financials */}
+                                <span className={cn(
+                                    'ml-auto w-24 shrink-0 text-right font-mono font-medium md:ml-0',
+                                    trade.status === 'OPEN' ? 'text-info' :
+                                        getSignedPnl(trade) >= 0 ? 'text-success' : 'text-danger'
+                                )}>
+                                    {trade.status === 'OPEN' ? 'AÇIK' : formatSignedUsd(getSignedPnl(trade))}
+                                </span>
+                                <span className="hidden w-28 shrink-0 text-right font-mono text-[11px] text-muted sm:block">
+                                    {trade.status === 'OPEN' ? 'KAPANIŞ BEKLİYOR' : `${formatSignedPct(getSignedPct(trade))} getiri`}
+                                </span>
 
-                                    {/* Notes */}
-                                    <div className="flex-1 min-w-0">
-                                        {trade.notes ? (
-                                            <div className="flex items-start gap-3">
-                                                <MessageSquare size={14} className="text-purple-500/40 mt-1 shrink-0" />
-                                                <p className="text-sm text-gray-400 line-clamp-2 italic font-medium">"{trade.notes}"</p>
-                                            </div>
-                                        ) : (
-                                            <span className="text-[10px] text-gray-700 font-black uppercase tracking-widest italic opacity-50">Null cognitive telemetry...</span>
-                                        )}
-
-                                        <div className="flex flex-wrap gap-2 mt-4">
-                                            {trade.setups.map((setup, i) => (
-                                                <div key={i} className="flex items-center gap-2 text-[8px] font-black text-gray-500 bg-white/5 px-3 py-1 rounded-lg border border-white/5 uppercase tracking-widest">
-                                                    <Target size={10} className="opacity-50" /> {setup}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    <div className="shrink-0 self-center hidden md:block opacity-0 group-hover:opacity-100 transition-all translate-x-[-10px] group-hover:translate-x-0">
-                                        <ChevronRight size={20} className="text-purple-500/40" />
-                                    </div>
+                                {/* Notes */}
+                                <div className="flex min-w-0 basis-full items-center gap-1.5 md:flex-1 md:basis-0">
+                                    {trade.notes ? (
+                                        <>
+                                            <MessageSquare size={12} className="shrink-0 text-muted" />
+                                            <p className="truncate text-secondary">"{trade.notes}"</p>
+                                        </>
+                                    ) : (
+                                        <span className="truncate text-muted">Null cognitive telemetry...</span>
+                                    )}
                                 </div>
-                            ))}
-                        </div>
+
+                                {trade.setups.length > 0 && (
+                                    <div className="flex shrink-0 flex-wrap items-center gap-1">
+                                        {trade.setups.map((setup, i) => (
+                                            <span key={i} className={cn(badge, badgeNeutral)}>
+                                                {setup}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+
+                                <ChevronRight size={12} className="hidden shrink-0 text-muted md:block" />
+                            </div>
+                        ))}
                     </div>
                 ))}
 
                 {filteredGroups.length === 0 && (
-                    <div className="flex flex-col items-center justify-center py-32 opacity-20">
-                        <BookOpen size={64} strokeWidth={1} className="mb-4" />
-                        <p className="text-[10px] font-black uppercase tracking-[0.3em]">No matching segments in memory</p>
+                    <div className={emptyLine}>
+                        <BookOpen size={14} className="shrink-0" />
+                        <p>No matching segments in memory</p>
                     </div>
                 )}
             </div>
-        </div>
+        </section>
     );
 };
 

@@ -7,3 +7,21 @@
   RewriteCond %{REQUEST_FILENAME} !-l
   RewriteRule . /index.html [L]
 </IfModule>
+
+# Security headers
+<IfModule mod_headers.c>
+  Header always set X-Frame-Options "DENY"
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+  # Only sent over HTTPS (browsers ignore HSTS on plain HTTP anyway)
+  Header always set Strict-Transport-Security "max-age=31536000" env=HTTPS
+  # Clickjacking / base-tag / plugin protection. These directives do not restrict scripts or
+  # network calls, so they cannot break the Tailwind CDN, TradingView, Binance or API traffic.
+  Header always set Content-Security-Policy "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"
+  # A stricter policy (script-src / connect-src) must allow: cdn.tailwindcss.com + 'unsafe-inline'
+  # (inline tailwind.config), s3.tradingview.com / *.tradingview.com (chart widget),
+  # wss://*.binance.com(:9443), https://*.binance.com, https://api.coingecko.com,
+  # https://cdn.jsdelivr.net (PDF fonts), https://assets.coincap.io (coin icons) and the
+  # VITE_API_URL origin. Test it with Content-Security-Policy-Report-Only before enforcing.
+</IfModule>

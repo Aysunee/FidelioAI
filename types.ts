@@ -36,13 +36,15 @@ export interface MarketIndex {
   changePercent: number;
 }
 
-export type Side = 'BUY' | 'SELL' | 'LONG' | 'SHORT' | 'CLOSE';
+// 'NEUTRAL' = a record without a direction (label 'Yönsüz', no colour / arrow). On signals produced
+// by the local engines BUY / SELL is the DIRECTION OF THE MEASURED MOVE (up / down), never advice.
+export type Side = 'BUY' | 'SELL' | 'LONG' | 'SHORT' | 'CLOSE' | 'NEUTRAL';
 
 export interface BigMoveSignal {
   id: string;
   symbol: string;
   type: 'RISE' | 'FALL' | 'HIGH' | 'LOW' | 'PULLBACK' | 'RALLY' | 'VOL_SPIKE' | 'WHALE';
-  timeframe?: '5m' | '15m' | '2h' | '24h' | '7d' | '30d';
+  timeframe?: '1m' | '5m' | '15m' | '2h' | '24h' | '7d' | '30d';
   changePercent?: number;
   price: number;
   description: string;
@@ -58,8 +60,17 @@ export interface Signal {
   price: number;
   time: string; // ISO string or HH:mm:ss
   note: string;
+  // Only shared (webhook / manual) signals may carry a confidence. The local engines never write
+  // one: they report the measured size in `magnitude` instead.
   confidence?: number;
+  // 'ALGO_DIVERGENCE' is the legacy source key of the funding engine.
   source?: 'WEBHOOK' | 'ALGO_MOMENTUM' | 'ALGO_DIVERGENCE' | 'ALGO_VOLUME' | 'MANUAL';
+  // Which engine produced the record. Local engines always set it together with `magnitude`.
+  engine?: 'MOMENTUM' | 'VOLUME' | 'FUNDING' | 'WEBHOOK' | 'MANUAL';
+  // The measured size behind the record, e.g. { value: 9.1, text: '+9.1%', caption: '24s değişim, yeni 24s zirve' },
+  // { value: 5.4, text: '5.4x', caption: 'son 1 saat hacmi / 24s ortalama saat' },
+  // { value: -0.0712, text: '−0.0712%', caption: '8s eşdeğeri fonlama' }.
+  magnitude?: { value: number; text: string; caption: string };
 }
 
 export interface Liquidation {
@@ -70,26 +81,6 @@ export interface Liquidation {
   amount: number; // Quantity in original units
   value: number; // Value in USDT
   time: number;
-}
-
-export interface Holding {
-  id: string;
-  symbol: string;
-  qty: number;
-  costBasis: number;
-}
-
-export interface PortfolioSummary {
-  totalValue: number;
-  totalCost: number;
-  totalPnL: number;
-  pnlPercent: number;
-}
-
-export interface UserProfile {
-  id: string;
-  email: string;
-  webhookSecret: string;
 }
 
 export interface NotificationRule {
@@ -130,7 +121,8 @@ export interface User {
   email: string;
   name: string;
   username: string;
-  password: string;
+  // Never returned by the API; only set in the add/edit user form when (re)setting a password.
+  password?: string;
   role: UserRole;
   status: 'active' | 'inactive';
   createdAt: number;

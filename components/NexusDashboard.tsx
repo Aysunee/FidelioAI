@@ -1,22 +1,22 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
-    TrendingUp, TrendingDown, Activity, Layers, Link as LinkIcon,
-    Search, Zap, Shield, Database, ArrowRight, BarChart3
+    Activity, Layers, Link as LinkIcon, Search, Zap, BarChart3,
+    ChevronRight, ChevronUp, ChevronDown, ChevronsUpDown
 } from 'lucide-react';
 import { useMarketData } from '../context/MarketContext';
-import { useUser } from '../context/UserContext';
-import { 
-    addPriceData, 
-    calculateCorrelationMatrix, 
-    getPriceHistory,
-    CorrelationMatrix as CorrelationMatrixType,
-    CorrelationPair,
-    getCorrelationColor,
-    cleanupOldData
+import { Ticker } from '../types';
+import { formatPrice } from '../utils/formatters';
+import {
+    addPriceData,
+    calculateCorrelationMatrix,
+    getSampleCount,
+    formatCorrelationWindow,
+    MIN_SAMPLES,
+    CorrelationMatrix as CorrelationMatrixType
 } from '../utils/correlationEngine';
 import CorrelationMatrix from './CorrelationMatrix';
 import ErrorBoundary from './ErrorBoundary';
+import { CoinIcon } from './terminal/CoinIcon';
 
 // --- DATA CONSTANTS ---
 const CATEGORIES = [
@@ -60,10 +60,11 @@ const CORRELATIONS = [
     { driver: "JST", followers: ["SUN"], note: "Tron Ekosistemi" },
 ];
 
-const getSymbolPair = (symbol: string) => {
+// Single symbol mapping used by every Nexus table. Symbols without live data (delisted, not on spot,
+// or not streamed yet) are handled by the data gate below, not by special cases here.
+const getSymbolPair = (symbol: string): string => {
     const s = symbol.toUpperCase();
     if (s === "TOTAL") return "BTCUSDT";
-    if (s === "GIGGLE") return null; // Only this one might not exist
     if (s === "SATS") return "1000SATSUSDT";
     const specialRules: Record<string, string> = {
         "BONK": "BONKUSDT", "PEPE": "PEPEUSDT", "SHIB": "SHIBUSDT", "FLOKI": "FLOKIUSDT", "WIF": "WIFUSDT"
@@ -71,115 +72,138 @@ const getSymbolPair = (symbol: string) => {
     return specialRules[s] || `${s}USDT`;
 };
 
+// 24h change of a symbol, or null when there is no live data for it
+const getLiveChange = (marketData: Record<string, Ticker>, symbol: string): number | null => {
+    const ticker = marketData[getSymbolPair(symbol)];
+    if (!ticker) return null;
+    const value = Number(ticker.priceChangePercent);
+    return Number.isFinite(value) ? value : null;
+};
+
+// Heuristic "direction agreement" of two 24h moves (-1..1). NOT a statistical correlation:
+// sign = same/opposite direction, magnitude = similarity of the move sizes.
+const getDirectionAgreement = (a: number, b: number): number => {
+    const sameDirection = (a >= 0) === (b >= 0);
+    const magnitude = Math.max(0, 1 - Math.abs(a - b) / 10);
+    return sameDirection ? magnitude : -magnitude;
+};
+
+type CorrelationSource = 'live' | 'estimated' | 'none';
+type CorrelationQuality = 'STRONG' | 'MODERATE' | 'WEAK' | 'NONE';
+
+interface FollowerInfo {
+    symbol: string;
+    change: number | null;
+    isLagging: boolean;
+    correlation: number | null;
+    // 24h direction-agreement heuristic, always computed when both moves are known (used for group averages)
+    agreement: number | null;
+    source: CorrelationSource;
+}
+
+interface CorrelationGroup {
+    driver: string;
+    followers: FollowerInfo[];
+    note: string;
+    maxChange: number | null;
+    driverChange: number | null;
+    hasOpportunity: boolean;
+    avgCorrelation: number | null;
+    correlationSource: CorrelationSource;
+    correlationQuality: CorrelationQuality;
+}
+
+// Thresholds depend on the metric: Pearson r on ~1s returns is structurally low (Epps effect), while the
+// 24h direction-agreement heuristic is often above 0.9, so the two are never graded on the same scale.
+const QUALITY_THRESHOLDS: Record<'live' | 'estimated', { strong: number; moderate: number }> = {
+    live: { strong: 0.5, moderate: 0.25 },
+    estimated: { strong: 0.7, moderate: 0.4 }
+};
+
+const getQuality = (value: number | null, source: CorrelationSource): CorrelationQuality => {
+    if (value === null || source === 'none') return 'NONE';
+    const { strong, moderate } = QUALITY_THRESHOLDS[source];
+    if (value > strong) return 'STRONG';
+    if (value > moderate) return 'MODERATE';
+    return 'WEAK';
+};
+
+const SOURCE_RANK: Record<CorrelationSource, number> = { live: 2, estimated: 1, none: 0 };
+
 const cn = (...classes: any[]) => classes.filter(Boolean).join(' ');
 
 // --- TABLE COMPONENTS ---
 
+// Shared by every Nexus table so the columns of the group, driver and coin rows line up.
+const TABLE_CLASS = "w-full min-w-[560px] table-fixed border-separate border-spacing-0 text-xs";
+// Horizontal padding is set per column (first: pl-3 pr-2, numbers: px-2, last: pl-4 pr-3)
+const TH_CLASS = "sticky top-0 z-10 h-7 border-b border-border bg-surface text-[10px] font-medium uppercase tracking-wider text-muted";
+const TD_CLASS = "h-7 border-b border-border";
+const BADGE_CLASS = "shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase";
+
+const TableColumns: React.FC = () => (
+    <colgroup>
+        <col style={{ width: '32%' }} />
+        <col style={{ width: '20%' }} />
+        <col style={{ width: '16%' }} />
+        <col />
+    </colgroup>
+);
+
 const ArchitectTableRow: React.FC<{
     symbol: string;
-    price?: string;
-    change?: string;
+    price?: number | string;
+    change?: number | string;
     role?: string;
     isDriver?: boolean;
     isLagging?: boolean;
     cluster?: string;
 }> = ({ symbol, price, change, role, isDriver = false, isLagging = false, cluster }) => {
-    const isPositive = parseFloat(change || '0') >= 0;
-    const { theme } = useUser();
+    const changeValue = change === undefined || change === null || change === '' ? NaN : Number(change);
+    const priceValue = price === undefined || price === null || price === '' ? NaN : Number(price);
+    const isPositive = !Number.isFinite(changeValue) || changeValue >= 0;
 
     // Safety check for symbol
     if (!symbol) return null;
 
     return (
-        <motion.tr
-            initial={{ opacity: 0, x: -5 }}
-            animate={{ opacity: 1, x: 0 }}
-            className={cn(
-                "group transition-all duration-500 relative overflow-hidden",
-                isDriver ? "bg-indigo-500/[0.03]" : "hover:bg-white/[0.02]",
-                isLagging && "bg-amber-500/[0.03] shadow-[inset_0_0_20px_rgba(245,158,11,0.05)]",
-                theme === 'corporate' && (isDriver ? "bg-gray-50" : "hover:bg-gray-50/50"),
-                theme === 'corporate' && isLagging && "bg-amber-50"
-            )}
-        >
-            <td className="py-3 px-4">
-                <div className="flex items-center gap-3">
-                    <div className={cn(
-                        "w-8 h-8 rounded-lg flex items-center justify-center font-black text-[10px] border shadow-sm transition-colors duration-500",
-                        isDriver ? "bg-indigo-600 text-white border-indigo-500 shadow-indigo-500/20" :
-                            isLagging ? "bg-amber-500 text-black border-amber-400 shadow-amber-500/20" :
-                                "bg-white/5 border-white/5 text-gray-400"
-                    )}>
-                        {symbol.charAt(0)}
-                    </div>
-                    <div>
-                        <div className="text-sm font-bold text-gray-100 flex items-center gap-2">
-                            {symbol}
-                            {isDriver && <Zap size={10} className="text-amber-400 fill-amber-400" />}
-                            {isLagging && (
-                                <motion.div
-                                    animate={{ opacity: [0.4, 1, 0.4] }}
-                                    transition={{ duration: 2, repeat: Infinity }}
-                                >
-                                    <Activity size={10} className="text-amber-400" />
-                                </motion.div>
-                            )}
-                        </div>
-                        {cluster && <div className="text-[10px] text-gray-500 font-medium uppercase tracking-tighter">{cluster}</div>}
-                    </div>
+        <tr className="hover:bg-surface-secondary" title={cluster}>
+            <td
+                className={cn(TD_CLASS, "pr-2", isDriver ? "pl-3" : "pl-8")}
+                // Lagging follower: warning marker on the left edge of the row
+                style={isLagging ? { boxShadow: 'inset 2px 0 0 var(--color-warning)' } : undefined}
+            >
+                <div className="flex min-w-0 items-center gap-1.5">
+                    <CoinIcon asset={symbol} size={16} />
+                    <span className={cn("truncate text-text", isDriver ? "font-semibold" : "font-medium")}>{symbol}</span>
+                    {isDriver && <Zap size={12} className="shrink-0 text-primary" />}
+                    {isLagging && <Activity size={12} className="shrink-0 text-warning" />}
                 </div>
             </td>
-            <td className="py-3 px-4 tabular-nums">
-                <div className="text-sm font-medium text-gray-200">
-                    {price ? `$${parseFloat(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}` : '---'}
-                </div>
+            <td className={cn(TD_CLASS, "truncate px-2 text-right font-mono text-text")}>
+                {Number.isFinite(priceValue) && priceValue > 0
+                    ? `$${priceValue < 1 ? formatPrice(priceValue) : priceValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
+                    : <span className="text-muted">---</span>}
             </td>
-            <td className="py-3 px-4 tabular-nums">
-                {change ? (
-                    <div className={cn(
-                        "inline-flex items-center text-xs font-bold px-2 py-0.5 rounded-md border",
-                        isPositive ? "text-emerald-400 border-emerald-500/10 bg-emerald-500/5" : "text-rose-400 border-rose-500/10 bg-rose-500/5"
-                    )}>
-                        {isPositive ? <TrendingUp size={10} className="mr-1" /> : <TrendingDown size={10} className="mr-1" />}
-                        {parseFloat(change).toFixed(2)}%
-                    </div>
-                ) : (
-                    <div className="inline-flex items-center text-xs font-bold px-2 py-0.5 rounded-md border border-gray-500/10 bg-gray-500/5 text-gray-500">
-                        <span className="text-[10px] uppercase tracking-wider">N/A</span>
-                    </div>
-                )}
+            <td className={cn(TD_CLASS, "truncate px-2 text-right font-mono", isPositive ? "text-success" : "text-danger")}>
+                {Number.isFinite(changeValue)
+                    ? `${changeValue.toFixed(2)}%`
+                    : <span className="font-sans text-[10px] uppercase tracking-wider text-muted">veri yok</span>}
             </td>
-            <td className="py-3 px-4">
-                <div className="flex items-center gap-2">
-                    <div className={cn(
-                        "text-[10px] font-bold uppercase tracking-widest",
-                        isDriver ? "text-indigo-400" : isLagging ? "text-amber-400" : "text-gray-500"
+            <td className={cn(TD_CLASS, "pl-4 pr-3")}>
+                <div className="flex min-w-0 items-center gap-2">
+                    <span className={cn(
+                        "truncate text-[10px] font-medium uppercase tracking-wider",
+                        isDriver ? "text-primary" : isLagging ? "text-warning" : "text-muted"
                     )}>
                         {role || (isDriver ? "Primary Driver" : "Secondary Pair")}
-                    </div>
+                    </span>
                     {isLagging && (
-                        <motion.span
-                            initial={{ scale: 0.9, opacity: 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            className="text-[8px] px-1.5 py-0.5 bg-amber-500 text-black font-black rounded uppercase tracking-tighter shadow-lg shadow-amber-500/20"
-                        >
-                            Opportunity
-                        </motion.span>
+                        <span className={cn(BADGE_CLASS, "bg-warning-soft text-warning")}>Opportunity</span>
                     )}
                 </div>
             </td>
-            <td className="py-3 px-4 text-right">
-                <div className="opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button className="text-gray-500 hover:text-purple-400 transition-colors">
-                        <ArrowRight size={14} />
-                    </button>
-                </div>
-            </td>
-            {/* Visual Flare for Lagging */}
-            {isLagging && (
-                <div className="absolute left-0 top-0 w-1 h-full bg-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.5)]" />
-            )}
-        </motion.tr>
+        </tr>
     );
 };
 
@@ -194,7 +218,6 @@ export const NexusDashboard: React.FC = () => {
     const { marketData } = useMarketData();
     const [activeTab, setActiveTab] = useState<'clusters' | 'correlations' | 'matrix'>('clusters');
     const [correlationMatrix, setCorrelationMatrix] = useState<CorrelationMatrixType | null>(null);
-    const [lastUpdate, setLastUpdate] = useState<number>(Date.now());
     const [searchTerm, setSearchTerm] = useState("");
     const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set());
     const [sortConfig, setSortConfig] = useState<{ field: 'name' | 'velocity' | 'price' | 'change', direction: 'asc' | 'desc' }>({
@@ -216,196 +239,101 @@ export const NexusDashboard: React.FC = () => {
         }));
     };
 
-    // Track price history for correlation calculation
+    // Track ~1s price samples for the live matrix. Only the symbols the matrix uses are recorded, and all
+    // of them share one timestamp per snapshot so their return series can be aligned.
     useEffect(() => {
-        // Add current prices to history whenever marketData updates
-        Object.entries(marketData).forEach(([symbol, data]) => {
-            if (data && data.lastPrice) {
-                addPriceData(symbol, parseFloat(data.lastPrice));
-            }
+        const sampleTime = Date.now();
+        MAJOR_SYMBOLS.forEach(symbol => {
+            const ticker = marketData[symbol];
+            if (ticker) addPriceData(symbol, Number(ticker.lastPrice), sampleTime);
         });
     }, [marketData]);
 
-    // Calculate correlation matrix periodically
+    // Recalculate the matrix periodically (only once enough samples exist)
     useEffect(() => {
-        // Initial calculation after 2 seconds
-        const initialTimeout = setTimeout(() => {
-            const priceHist = getPriceHistory();
-            const symbolsWithData = MAJOR_SYMBOLS.filter(symbol => {
-                const history = priceHist.get(symbol);
-                return history && history.length >= 5;
-            });
-            if (symbolsWithData.length >= 3) {
-                const matrix = calculateCorrelationMatrix(symbolsWithData);
-                setCorrelationMatrix(matrix);
-                setLastUpdate(Date.now());
-                console.log('[Correlation] Initial matrix calculated');
-            }
-        }, 2000);
-
         const interval = setInterval(() => {
-            // Get symbols that have enough data in priceHistory
-            const priceHist = getPriceHistory();
-            const symbolsWithData = MAJOR_SYMBOLS.filter(symbol => {
-                const history = priceHist.get(symbol);
-                return history && history.length >= 5;
-            });
-            
+            const symbolsWithData = MAJOR_SYMBOLS.filter(symbol => getSampleCount(symbol) > MIN_SAMPLES);
+
             if (symbolsWithData.length >= 3) {
                 try {
                     const matrix = calculateCorrelationMatrix(symbolsWithData);
-                    console.log('[Correlation] Matrix calculated:', {
-                        symbols: matrix.symbols.length,
-                        pairs: matrix.pairs.length,
-                        timestamp: new Date(matrix.timestamp).toLocaleTimeString()
-                    });
-                    setCorrelationMatrix(matrix);
-                    setLastUpdate(Date.now());
+                    setCorrelationMatrix(matrix.pairs.length > 0 ? matrix : null);
                 } catch (err) {
                     console.error('[Correlation] Error calculating matrix:', err);
                 }
             } else {
-                console.log('[Correlation] Not enough symbols:', symbolsWithData.length);
+                setCorrelationMatrix(null);
             }
         }, 5000);
 
-        return () => {
-            clearInterval(interval);
-            clearTimeout(initialTimeout);
-        };
+        return () => clearInterval(interval);
     }, []);
 
-    // Calculate correlations using 24h price change as fallback - only recalculate every 10 seconds
-    const [correlationTick, setCorrelationTick] = useState(0);
-    
-    useEffect(() => {
-        const tickInterval = setInterval(() => {
-            setCorrelationTick(t => t + 1);
-        }, 10000); // Update every 10 seconds
-        return () => clearInterval(tickInterval);
-    }, []);
+    const correlationWindowLabel = correlationMatrix ? formatCorrelationWindow(correlationMatrix.windowMs) : '';
 
-    const estimatedCorrelations = useMemo(() => {
+    // Driver/follower groups. Followers without live data never get a correlation or a lag alert.
+    // A real (short-window) correlation is used when the matrix has the pair; otherwise a clearly
+    // labelled 24h "direction agreement" heuristic is shown instead.
+    const correlations = useMemo<CorrelationGroup[]>(() => {
         return CORRELATIONS.map(corr => {
             const driverPair = getSymbolPair(corr.driver);
-            const driverChangePercent = driverPair && marketData[driverPair] 
-                ? parseFloat(marketData[driverPair].priceChangePercent) 
-                : 0;
+            const driverChange = getLiveChange(marketData, corr.driver);
 
-            const followers = Array.isArray(corr.followers) ? corr.followers.map(followerSymbol => {
+            const followers: FollowerInfo[] = corr.followers.map(followerSymbol => {
                 const pair = getSymbolPair(followerSymbol);
-                const pairChange = pair && marketData[pair] 
-                    ? parseFloat(marketData[pair].priceChangePercent) 
-                    : 0;
+                const change = getLiveChange(marketData, followerSymbol);
 
-                // Estimate correlation from 24h moves
-                const sameDirection = (driverChangePercent >= 0 && pairChange >= 0) || 
-                                     (driverChangePercent < 0 && pairChange < 0);
-                const diff = Math.abs(driverChangePercent - pairChange);
-                const estimatedCorr = sameDirection 
-                    ? Math.max(0.3, 1 - (diff / 10)) 
-                    : -Math.max(0.3, 1 - (diff / 10));
+                if (change === null || driverChange === null) {
+                    return { symbol: followerSymbol, change, isLagging: false, correlation: null, agreement: null, source: 'none' as const };
+                }
 
-                // Lag detection
-                const isLagging = Math.abs(estimatedCorr) > 0.5 && 
-                    driverChangePercent > 2.0 && 
-                    pairChange < 0.5 && 
-                    (driverChangePercent - pairChange) > 1.5;
-
-                return { 
-                    symbol: followerSymbol, 
-                    change: pairChange, 
-                    isLagging,
-                    correlation: estimatedCorr,
-                    correlationStrength: Math.abs(estimatedCorr) > 0.7 ? 'STRONG' : 
-                                        Math.abs(estimatedCorr) > 0.4 ? 'MODERATE' : 'WEAK'
-                };
-            }) : [];
-
-            const maxChange = followers.length > 0 
-                ? Math.max(driverChangePercent, ...followers.map(f => f.change ?? 0)) 
-                : driverChangePercent;
-            const hasOpportunity = followers.some(f => f.isLagging);
-            const avgCorrelation = followers.length > 0 
-                ? (followers.reduce((sum, f) => sum + (f.correlation ?? 0), 0) / followers.length)
-                : 0.7;
-
-            return { 
-                ...corr, 
-                followers, 
-                maxChange: isNaN(maxChange) ? 0 : maxChange, 
-                driverChange: driverChangePercent, 
-                hasOpportunity,
-                avgCorrelation: isNaN(avgCorrelation) ? 0.7 : avgCorrelation,
-                correlationQuality: avgCorrelation > 0.7 ? 'STRONG' : avgCorrelation > 0.4 ? 'MODERATE' : 'WEAK'
-            };
-        });
-    }, [correlationTick, marketData]);
-
-    // Calculate enhanced correlations with real data (when available)
-    const enhancedCorrelations = useMemo(() => {
-        // If no correlation matrix yet, use estimated correlations
-        if (!correlationMatrix) return estimatedCorrelations;
-        
-        return CORRELATIONS.map(corr => {
-            const driverPair = getSymbolPair(corr.driver);
-            const driverChangePercent = driverPair && marketData[driverPair] 
-                ? parseFloat(marketData[driverPair].priceChangePercent) 
-                : 0;
-
-            const followers = Array.isArray(corr.followers) ? corr.followers.map(followerSymbol => {
-                const pair = getSymbolPair(followerSymbol);
-                const pairChange = pair && marketData[pair] 
-                    ? parseFloat(marketData[pair].priceChangePercent) 
-                    : 0;
-
-                // Find actual correlation data
-                const corrData = correlationMatrix?.pairs?.find(p => 
+                const livePair = correlationMatrix?.pairs.find(p =>
                     (p.symbolA === driverPair && p.symbolB === pair) ||
                     (p.symbolA === pair && p.symbolB === driverPair)
                 );
+                const agreement = getDirectionAgreement(driverChange, change);
+                const correlation = livePair ? livePair.correlation : agreement;
 
-                // Use real correlation if available, otherwise estimated
-                const estimatedCorrData = estimatedCorrelations.find(ec => ec.driver === corr.driver);
-                const fallbackCorr = estimatedCorrData?.followers?.find((ef: any) => ef.symbol === followerSymbol)?.correlation;
-                const correlationValue = corrData?.correlation ?? fallbackCorr ?? 0;
+                // Lag detection
+                const isLagging = Math.abs(correlation) > 0.5 &&
+                    driverChange > 2.0 &&
+                    change < 0.5 &&
+                    (driverChange - change) > 1.5;
 
-                // Enhanced lag logic with correlation context
-                const correlationStrength = Math.abs(correlationValue);
-                const isLagging = correlationStrength > 0.5 && 
-                    driverChangePercent > 2.0 && 
-                    pairChange < 0.5 && 
-                    (driverChangePercent - pairChange) > 1.5;
-
-                return { 
-                    symbol: followerSymbol, 
-                    change: pairChange, 
+                return {
+                    symbol: followerSymbol,
+                    change,
                     isLagging,
-                    correlation: correlationValue,
-                    correlationStrength: corrData?.strength ?? 
-                        (correlationStrength > 0.7 ? 'STRONG' : correlationStrength > 0.4 ? 'MODERATE' : 'WEAK')
+                    correlation,
+                    agreement,
+                    source: livePair ? 'live' as const : 'estimated' as const
                 };
-            }) : [];
+            });
 
-            const maxChange = followers.length > 0 
-                ? Math.max(driverChangePercent, ...followers.map(f => f.change ?? 0)) 
-                : driverChangePercent;
-            const hasOpportunity = followers.some(f => f.isLagging);
-            const avgCorrelation = followers.length > 0 
-                ? (followers.reduce((sum, f) => sum + Math.abs(f.correlation ?? 0), 0) / followers.length)
-                : 0.7;
+            const withData = followers.filter(f => f.correlation !== null);
+            const knownChanges = [driverChange, ...followers.map(f => f.change)].filter((c): c is number => c !== null);
+            // The group average uses ONE metric only: live Pearson r when every follower with data has it,
+            // otherwise the 24h heuristic for all of them (live r and the heuristic are never mixed).
+            const correlationSource: CorrelationSource = withData.length === 0
+                ? 'none'
+                : withData.every(f => f.source === 'live') ? 'live' : 'estimated';
+            const groupValues = withData.map(f => (correlationSource === 'live' ? f.correlation : f.agreement) as number);
+            const avgCorrelation = groupValues.length > 0
+                ? groupValues.reduce((sum, v) => sum + v, 0) / groupValues.length
+                : null;
 
-            return { 
-                ...corr, 
-                followers, 
-                maxChange: isNaN(maxChange) ? 0 : maxChange, 
-                driverChange: driverChangePercent, 
-                hasOpportunity,
-                avgCorrelation: isNaN(avgCorrelation) ? 0.7 : avgCorrelation,
-                correlationQuality: avgCorrelation > 0.7 ? 'STRONG' : avgCorrelation > 0.4 ? 'MODERATE' : 'WEAK'
+            return {
+                ...corr,
+                followers,
+                maxChange: knownChanges.length > 0 ? Math.max(...knownChanges) : null,
+                driverChange,
+                hasOpportunity: followers.some(f => f.isLagging),
+                avgCorrelation,
+                correlationSource,
+                correlationQuality: getQuality(avgCorrelation, correlationSource)
             };
         });
-    }, [correlationMatrix, correlationTick]);
+    }, [marketData, correlationMatrix]);
 
     const processedData = useMemo(() => {
         const lowSearch = searchTerm.toLowerCase();
@@ -413,9 +341,11 @@ export const NexusDashboard: React.FC = () => {
         if (activeTab === 'clusters') {
             const clusters = CATEGORIES.map(cat => {
                 const filteredCoins = cat.coins.filter(c => c.toLowerCase().includes(lowSearch) || cat.name.toLowerCase().includes(lowSearch));
-                const validCoins = cat.coins.filter(c => getSymbolPair(c) && marketData[getSymbolPair(c)!]);
-                const avgChange = validCoins.length > 0
-                    ? validCoins.reduce((acc, c) => acc + parseFloat(marketData[getSymbolPair(c)!].priceChangePercent), 0) / validCoins.length
+                const validChanges = cat.coins
+                    .map(c => getLiveChange(marketData, c))
+                    .filter((c): c is number => c !== null);
+                const avgChange = validChanges.length > 0
+                    ? validChanges.reduce((acc, c) => acc + c, 0) / validChanges.length
                     : 0;
 
                 // Also sort coins within cluster if price/change sort is active
@@ -425,12 +355,12 @@ export const NexusDashboard: React.FC = () => {
                         return 0; // No coin-level sorting for 'name' or 'velocity'
                     }
 
-                    const dataA = marketData[getSymbolPair(a)!];
-                    const dataB = marketData[getSymbolPair(b)!];
+                    const dataA = marketData[getSymbolPair(a)];
+                    const dataB = marketData[getSymbolPair(b)];
                     if (!dataA || !dataB) return 0;
 
-                    const valA = sortConfig.field === 'price' ? parseFloat(dataA.lastPrice) : parseFloat(dataA.priceChangePercent);
-                    const valB = sortConfig.field === 'price' ? parseFloat(dataB.lastPrice) : parseFloat(dataB.priceChangePercent);
+                    const valA = sortConfig.field === 'price' ? Number(dataA.lastPrice) : Number(dataA.priceChangePercent);
+                    const valB = sortConfig.field === 'price' ? Number(dataB.lastPrice) : Number(dataB.priceChangePercent);
 
                     return sortConfig.direction === 'desc' ? valB - valA : valA - valB;
                 });
@@ -449,7 +379,7 @@ export const NexusDashboard: React.FC = () => {
                 return sortConfig.direction === 'desc' ? b.avgChange - a.avgChange : a.avgChange - b.avgChange;
             });
         } else if (activeTab === 'correlations') {
-            return enhancedCorrelations
+            return correlations
                 .filter(corr =>
                     corr.driver.toLowerCase().includes(lowSearch) ||
                     corr.followers.some(f => f.symbol.toLowerCase().includes(lowSearch)) ||
@@ -458,429 +388,315 @@ export const NexusDashboard: React.FC = () => {
                 .sort((a, b) => {
                     // Prioritize those with active opportunities, then by correlation strength, then by max momentum
                     if (a.hasOpportunity !== b.hasOpportunity) return a.hasOpportunity ? -1 : 1;
-                    if (b.avgCorrelation !== a.avgCorrelation) return b.avgCorrelation - a.avgCorrelation;
-                    return b.maxChange - a.maxChange;
+                    // Values are only comparable within the same metric: live r groups first, then the
+                    // heuristic ones, groups without data (null) last
+                    if (a.correlationSource !== b.correlationSource) {
+                        return SOURCE_RANK[b.correlationSource] - SOURCE_RANK[a.correlationSource];
+                    }
+                    const corrA = a.avgCorrelation ?? -Infinity;
+                    const corrB = b.avgCorrelation ?? -Infinity;
+                    if (corrB !== corrA) return corrB > corrA ? 1 : -1;
+                    const maxA = a.maxChange ?? -Infinity;
+                    const maxB = b.maxChange ?? -Infinity;
+                    return maxB === maxA ? 0 : maxB > maxA ? 1 : -1;
                 });
         } else {
             return []; // matrix tab handles its own data
         }
-    }, [searchTerm, activeTab, sortConfig, enhancedCorrelations]);
+    }, [searchTerm, activeTab, sortConfig, correlations, marketData]);
 
     return (
-        <div className="flex-1 overflow-hidden flex flex-col space-y-4">
-            {/* Minimalist Sub-Header */}
-            <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-white/[0.02] border border-white/5 p-2 rounded-2xl backdrop-blur-xl">
-                <div className="flex items-center gap-1">
+        // Fills the view at every width (flex-1 inside the shell's column, h-full inside a grid cell);
+        // the tabs stay put and only the content below them scrolls.
+        <section className="flex w-full flex-1 flex-col bg-surface lg:h-full lg:min-h-0" aria-label="Nexus">
+            {/* Tabs + search (the search drops to its own row on narrow screens) */}
+            <header className="flex shrink-0 flex-wrap items-stretch border-b border-border">
+                <div
+                    role="tablist"
+                    className="flex h-8 w-full items-stretch gap-4 overflow-x-auto border-b border-border px-3 scrollbar-hide sm:w-auto sm:border-b-0"
+                >
                     <TabButton
                         active={activeTab === 'clusters'}
                         onClick={() => setActiveTab('clusters')}
-                        icon={<Layers size={14} />}
+                        icon={<Layers size={12} />}
                         label="Alpha Clusters"
                     />
                     <TabButton
                         active={activeTab === 'correlations'}
                         onClick={() => setActiveTab('correlations')}
-                        icon={<LinkIcon size={14} />}
+                        icon={<LinkIcon size={12} />}
                         label="Correlations"
                     />
                     <TabButton
                         active={activeTab === 'matrix'}
                         onClick={() => setActiveTab('matrix')}
-                        icon={<BarChart3 size={14} />}
+                        icon={<BarChart3 size={12} />}
                         label="Live Matrix"
                     />
                 </div>
 
-                <div className="relative w-full md:w-64 group">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 transition-colors group-focus-within:text-purple-400" size={14} />
+                <div className="relative flex h-8 w-full items-center px-3 sm:ml-auto sm:w-64">
+                    <Search className="pointer-events-none absolute left-[18px] top-1/2 -translate-y-1/2 text-muted" size={12} />
                     <input
                         type="text"
                         placeholder="Search Nexus..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
-                        className="w-full bg-transparent border-none text-xs text-gray-200 pl-9 pr-4 py-2 focus:outline-none placeholder-gray-600"
+                        className="h-6 w-full rounded-sm border border-border bg-surface-secondary pl-6 pr-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary"
                     />
                 </div>
-            </div>
+            </header>
 
-            {/* Content Container */}
-            <div className="flex-1 overflow-y-auto scrollbar-hide border border-white/5 rounded-2xl bg-black/20 backdrop-blur-sm">
+            {/* Content: scrolls inside the panel on both axes, never the page */}
+            <div className="relative min-h-[320px] flex-1">
+            <div className="absolute inset-0 overflow-auto">
                 {activeTab === 'matrix' ? (
                     <ErrorBoundary>
-                        <div className="p-6">
-                            {correlationMatrix ? (
-                                <CorrelationMatrix matrix={correlationMatrix} />
-                            ) : (
-                                <div className="flex flex-col items-center justify-center py-20 text-center">
-                                    <div className="w-16 h-16 rounded-2xl bg-indigo-500/10 flex items-center justify-center mb-4 animate-pulse">
-                                        <Activity size={32} className="text-indigo-400" />
-                                    </div>
-                                    <h3 className="text-lg font-black text-white uppercase tracking-tighter mb-2">
-                                        Correlation Data Loading
-                                    </h3>
-                                    <p className="text-sm text-gray-500 max-w-md mb-4">
-                                        Collecting market data to calculate real-time correlations. 
-                                        This may take a few seconds...
-                                    </p>
-                                    <MatrixDebugInfo />
-                                </div>
-                            )}
-                        </div>
+                        {correlationMatrix ? (
+                            <CorrelationMatrix matrix={correlationMatrix} />
+                        ) : (
+                            <div className="flex h-full min-h-[160px] flex-col items-center justify-center gap-1.5 px-4 py-6 text-center">
+                                <h3 className="flex items-center gap-1.5 text-xs text-secondary">
+                                    <Activity size={14} className="shrink-0" />
+                                    Korelasyon verisi toplanıyor
+                                </h3>
+                                <p className="max-w-md text-[11px] leading-snug text-muted">
+                                    Kısa vadeli korelasyon için her sembolden en az {MIN_SAMPLES} fiyat örneği (yaklaşık saniyede bir)
+                                    gerekiyor; bu 1-2 dakika sürer. Veri yalnızca bu sayfa açıkken toplanır.
+                                </p>
+                                <p className="font-mono text-[11px] text-secondary">
+                                    Hazır sembol: {MAJOR_SYMBOLS.filter(symbol => getSampleCount(symbol) > MIN_SAMPLES).length}/{MAJOR_SYMBOLS.length}
+                                </p>
+                            </div>
+                        )}
                     </ErrorBoundary>
                 ) : activeTab === 'correlations' ? (
                     <ErrorBoundary>
-                        <CorrelationTableContent 
-                            processedData={processedData}
+                        <CorrelationTableContent
+                            processedData={processedData as CorrelationGroup[]}
                             marketData={marketData}
-                            correlationMatrix={correlationMatrix}
+                            windowLabel={correlationWindowLabel}
                         />
                     </ErrorBoundary>
                 ) : (
-                <table className="w-full text-left border-collapse">
-                    <thead className="sticky top-0 z-10 bg-gray-950/80 backdrop-blur-3xl">
-                        <tr className="border-b border-white/5">
+                <table className={TABLE_CLASS}>
+                    <TableColumns />
+                    <thead>
+                        <tr>
                             <th
-                                onClick={() => handleSort('name')}
-                                className="py-3 px-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] cursor-pointer hover:text-gray-400 transition-colors group"
+                                className={cn(TH_CLASS, "pl-3 pr-2 text-left")}
+                                aria-sort={sortConfig.field === 'name' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                             >
-                                <div className="flex items-center gap-1">
+                                <button type="button" onClick={() => handleSort('name')} className={SORT_BUTTON_CLASS}>
                                     Asset Cluster
                                     <SortIcon active={sortConfig.field === 'name'} direction={sortConfig.direction} />
-                                </div>
+                                </button>
                             </th>
                             <th
-                                onClick={() => handleSort('price')}
-                                className="py-3 px-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] cursor-pointer hover:text-gray-400 transition-colors"
+                                className={cn(TH_CLASS, "px-2 text-right")}
+                                aria-sort={sortConfig.field === 'price' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                             >
-                                <div className="flex items-center gap-1">
+                                <button type="button" onClick={() => handleSort('price')} className={cn(SORT_BUTTON_CLASS, "justify-end")}>
                                     Live Price
                                     <SortIcon active={sortConfig.field === 'price'} direction={sortConfig.direction} />
-                                </div>
+                                </button>
                             </th>
                             <th
-                                onClick={() => handleSort('change')}
-                                className="py-3 px-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] cursor-pointer hover:text-gray-400 transition-colors"
+                                className={cn(TH_CLASS, "px-2 text-right")}
+                                aria-sort={(sortConfig.field === 'change' || sortConfig.field === 'velocity') ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                             >
-                                <div className="flex items-center gap-1">
+                                <button type="button" onClick={() => handleSort('change')} className={cn(SORT_BUTTON_CLASS, "justify-end")}>
                                     24h Velocity
                                     <SortIcon active={sortConfig.field === 'change' || sortConfig.field === 'velocity'} direction={sortConfig.direction} />
-                                </div>
+                                </button>
                             </th>
-                            <th className="py-3 px-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Market Role</th>
-                            <th className="py-3 px-4"></th>
+                            <th className={cn(TH_CLASS, "pl-4 pr-3 text-left")}>Market Role</th>
                         </tr>
                     </thead>
-                    <tbody className="divide-y divide-white/[0.02]">
-                        <AnimatePresence mode="popLayout">
-                            {activeTab === 'clusters' ? (
-                                (processedData as any[]).map((cat) => (
-                                    <React.Fragment key={cat.name}>
-                                        <tr
-                                            onClick={() => toggleCat(cat.name)}
-                                            className="bg-white/[0.01] hover:bg-white/[0.03] cursor-pointer transition-colors group/header"
-                                        >
-                                            <td colSpan={5} className="py-3 px-4">
-                                                <div className="flex items-center justify-between">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className={cn(
-                                                            "transition-transform duration-300",
-                                                            expandedCats.has(cat.name) ? "rotate-90" : ""
-                                                        )}>
-                                                            <ArrowRight size={12} className="text-purple-500/50" />
-                                                        </div>
-                                                        <span className="text-[10px] font-black text-white/70 uppercase tracking-widest">{cat.name}</span>
-                                                    </div>
-                                                    <div className="flex items-center gap-3">
-                                                        <span className={cn(
-                                                            "text-[10px] font-bold tabular-nums px-2 py-0.5 rounded-md border",
-                                                            cat.avgChange >= 0 ? "text-emerald-400 border-emerald-500/10 bg-emerald-500/5" : "text-rose-400 border-rose-500/10 bg-rose-500/5"
-                                                        )}>
-                                                            AVG. {cat.avgChange.toFixed(2)}%
-                                                        </span>
-                                                        <div className="w-32 h-[1px] bg-gradient-to-r from-purple-500/20 to-transparent" />
-                                                    </div>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                        {expandedCats.has(cat.name) && cat.filteredCoins.map((coin: string) => {
-                                            const pair = getSymbolPair(coin);
-                                            const data = pair ? marketData[pair] : null;
-                                            return (
-                                                <ArchitectTableRow
-                                                    key={coin}
-                                                    symbol={coin}
-                                                    price={data?.lastPrice}
-                                                    change={data?.priceChangePercent}
-                                                    cluster={cat.name}
+                    <tbody>
+                        {(processedData as any[]).map((cat) => {
+                            const expanded = expandedCats.has(cat.name);
+                            return (
+                                <React.Fragment key={cat.name}>
+                                    <tr
+                                        onClick={() => toggleCat(cat.name)}
+                                        className={cn(
+                                            "cursor-pointer hover:bg-surface-secondary",
+                                            expanded && "bg-surface-secondary"
+                                        )}
+                                    >
+                                        <td colSpan={2} className={cn(TD_CLASS, "pl-3 pr-2")}>
+                                            <button
+                                                type="button"
+                                                aria-expanded={expanded}
+                                                className="flex max-w-full items-center gap-1.5 text-left focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
+                                            >
+                                                <ChevronRight
+                                                    size={12}
+                                                    className={cn("shrink-0 text-secondary transition-transform", expanded && "rotate-90")}
                                                 />
-                                            );
-                                        })}
-                                    </React.Fragment>
-                                ))
-                            ) : (
-                                (processedData as any[]).map((corr) => (
-                                    <React.Fragment key={corr.driver + corr.note}>
-                                        <tr className={cn(
-                                            "transition-colors",
-                                            corr.hasOpportunity ? "bg-amber-500/[0.05]" : "bg-indigo-500/[0.02]"
-                                        )}>
-                                            <td colSpan={5} className="py-2 px-4">
-                                                <div className="flex items-center justify-between">
-                                                    <div className="flex items-center gap-2">
-                                                        <span className={cn(
-                                                            "text-[10px] font-black uppercase tracking-widest",
-                                                            corr.hasOpportunity ? "text-amber-500" : "text-indigo-500/50"
-                                                        )}>{corr.note}</span>
-                                                        <div className={cn(
-                                                            "flex-1 h-[1px] bg-gradient-to-r to-transparent",
-                                                            corr.hasOpportunity ? "from-amber-500/20" : "from-indigo-500/10"
-                                                        )} />
-                                                    </div>
-                                                    <div className="flex items-center gap-3">
-                                                        {/* Correlation Quality Badge */}
-                                                        <span 
-                                                            className={cn(
-                                                                "text-[8px] font-black uppercase tracking-wider px-2 py-0.5 rounded border",
-                                                                corr.correlationQuality === 'STRONG' 
-                                                                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" 
-                                                                    : corr.correlationQuality === 'MODERATE'
-                                                                    ? "bg-blue-500/10 border-blue-500/30 text-blue-400"
-                                                                    : "bg-gray-500/10 border-gray-500/30 text-gray-400"
-                                                            )}
-                                                            title={correlationMatrix ? "Calculated from live price history" : "Estimated from 24h price change"}
-                                                        >
-                                                            {corr.correlationQuality === 'STRONG' && '● '}
-                                                            {corr.correlationQuality === 'MODERATE' && '◐ '}
-                                                            {corr.correlationQuality === 'WEAK' && '○ '}
-                                                            r={correlationMatrix ? '' : '~'}{corr.avgCorrelation ? corr.avgCorrelation.toFixed(2) : '0.7'}
-                                                            {correlationMatrix ? ' ✓' : ''}
-                                                        </span>
-                                                        {corr.hasOpportunity && (
-                                                            <span className="text-[8px] font-black text-amber-500 animate-pulse">LAGGING ALERT</span>
-                                                        )}
-                                                        <span className="text-[9px] font-bold text-indigo-400/50 uppercase tracking-tighter">Peak: {corr.maxChange.toFixed(2)}%</span>
-                                                    </div>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                        {/* Driver Row */}
-                                        {(() => {
-                                            const pair = getSymbolPair(corr.driver);
-                                            const data = pair ? marketData[pair] : null;
-                                            return (
-                                                <ArchitectTableRow
-                                                    symbol={corr.driver}
-                                                    price={data?.lastPrice}
-                                                    change={data?.priceChangePercent}
-                                                    isDriver={true}
-                                                    role="Catalyst Driver"
-                                                />
-                                            );
-                                        })()}
-                                        {/* Follower Rows */}
-                                        {corr.followers.map((f: any) => {
-                                            const pair = getSymbolPair(f.symbol);
-                                            const data = pair ? marketData[pair] : null;
-                                            // Build role text with correlation info
-                                            let roleText = f.isLagging ? "Laggard Follower" : "Follower Pair";
-                                            if (f.correlation != null && !isNaN(f.correlation)) {
-                                                const corrStr = f.correlation > 0 ? `+${f.correlation.toFixed(2)}` : f.correlation.toFixed(2);
-                                                roleText += ` (${corrStr})`;
-                                            }
-                                            return (
-                                                <ArchitectTableRow
-                                                    key={f.symbol}
-                                                    symbol={f.symbol}
-                                                    price={data?.lastPrice}
-                                                    change={data?.priceChangePercent}
-                                                    isLagging={f.isLagging}
-                                                    role={roleText}
-                                                />
-                                            );
-                                        })}
-                                    </React.Fragment>
-                                ))
-                            )}
-                        </AnimatePresence>
+                                                <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-text">{cat.name}</span>
+                                            </button>
+                                        </td>
+                                        <td className={cn(TD_CLASS, "truncate px-2 text-right font-mono", cat.avgChange >= 0 ? "text-success" : "text-danger")}>
+                                            <span className="mr-1 font-sans text-[10px] text-muted">AVG.</span>
+                                            {cat.avgChange.toFixed(2)}%
+                                        </td>
+                                        <td className={TD_CLASS} />
+                                    </tr>
+                                    {expanded && cat.filteredCoins.map((coin: string) => {
+                                        const pair = getSymbolPair(coin);
+                                        const data = pair ? marketData[pair] : null;
+                                        return (
+                                            <ArchitectTableRow
+                                                key={coin}
+                                                symbol={coin}
+                                                price={data?.lastPrice}
+                                                change={data?.priceChangePercent}
+                                                cluster={cat.name}
+                                            />
+                                        );
+                                    })}
+                                </React.Fragment>
+                            );
+                        })}
                     </tbody>
                 </table>
                 )}
             </div>
-        </div>
+            </div>
+        </section>
     );
 };
 
 // Separate component for Correlations table to better isolate errors
 const CorrelationTableContent: React.FC<{
-    processedData: any[];
-    marketData: Record<string, any>;
-    correlationMatrix: CorrelationMatrixType | null;
-}> = ({ processedData, marketData, correlationMatrix }) => {
-    const getSymbolPair = (symbol: string) => {
-        const s = symbol.toUpperCase();
-        if (s === "TOTAL") return "BTCUSDT";
-        if (s === "SATS") return "1000SATSUSDT";
-        const specialRules: Record<string, string> = {
-            "BONK": "BONKUSDT", "PEPE": "PEPEUSDT", "SHIB": "SHIBUSDT", "FLOKI": "FLOKIUSDT", "WIF": "WIFUSDT"
-        };
-        return specialRules[s] || `${s}USDT`;
+    processedData: CorrelationGroup[];
+    marketData: Record<string, Ticker>;
+    windowLabel: string;
+}> = ({ processedData, marketData, windowLabel }) => {
+    const formatSigned = (value: number) => (value > 0 ? `+${value.toFixed(2)}` : value.toFixed(2));
+
+    const getBadgeTitle = (source: CorrelationSource) => {
+        if (source === 'live') return `Son ${windowLabel || 'birkaç dakika'} içindeki ~1 sn aralıklı getirilerden hesaplanan Pearson korelasyonu (kısa vadeli)`;
+        if (source === 'estimated') return "24 saatlik değişimlerin benzerliğinden türetilen sezgisel yön uyumu; istatistiksel korelasyon değildir";
+        return "Takipçiler için canlı veri yok";
     };
 
-    const cn = (...classes: any[]) => classes.filter(Boolean).join(' ');
-
     return (
-        <table className="w-full text-left border-collapse">
-            <thead className="sticky top-0 z-10 bg-gray-950/80 backdrop-blur-3xl">
-                <tr className="border-b border-white/5">
-                    <th className="py-3 px-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Asset Cluster</th>
-                    <th className="py-3 px-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Live Price</th>
-                    <th className="py-3 px-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">24h Velocity</th>
-                    <th className="py-3 px-4 text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Market Role</th>
-                    <th className="py-3 px-4"></th>
+        <table className={TABLE_CLASS}>
+            <TableColumns />
+            <thead>
+                <tr>
+                    <th className={cn(TH_CLASS, "pl-3 pr-2 text-left")}>Asset Cluster</th>
+                    <th className={cn(TH_CLASS, "px-2 text-right")}>Live Price</th>
+                    <th className={cn(TH_CLASS, "px-2 text-right")}>24h Velocity</th>
+                    <th className={cn(TH_CLASS, "pl-4 pr-3 text-left")}>Market Role</th>
                 </tr>
             </thead>
-            <tbody className="divide-y divide-white/[0.02]">
-                <AnimatePresence mode="popLayout">
-                    {(processedData as any[]).map((corr) => (
-                        <React.Fragment key={`${corr.driver}-${corr.note}`}>
-                            <tr className={cn(
-                                "transition-colors",
-                                corr.hasOpportunity ? "bg-amber-500/[0.05]" : "bg-indigo-500/[0.02]"
-                            )}>
-                                <td colSpan={5} className="py-2 px-4">
-                                    <div className="flex items-center justify-between">
-                                        <div className="flex items-center gap-2">
-                                            <span className={cn(
-                                                "text-[10px] font-black uppercase tracking-widest",
-                                                corr.hasOpportunity ? "text-amber-500" : "text-indigo-500/50"
-                                            )}>{corr.note}</span>
-                                            <div className={cn(
-                                                "flex-1 h-[1px] bg-gradient-to-r to-transparent",
-                                                corr.hasOpportunity ? "from-amber-500/20" : "from-indigo-500/10"
-                                            )} />
-                                        </div>
-                                        <div className="flex items-center gap-3">
-                                            <span 
-                                                className={cn(
-                                                    "text-[8px] font-black uppercase tracking-wider px-2 py-0.5 rounded border",
-                                                    corr.correlationQuality === 'STRONG' 
-                                                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" 
-                                                        : corr.correlationQuality === 'MODERATE'
-                                                        ? "bg-blue-500/10 border-blue-500/30 text-blue-400"
-                                                        : "bg-gray-500/10 border-gray-500/30 text-gray-400"
-                                                )}
-                                                title={correlationMatrix ? "Calculated from live price history" : "Estimated from 24h price change"}
-                                            >
-                                                {corr.correlationQuality === 'STRONG' && '● '}
-                                                {corr.correlationQuality === 'MODERATE' && '◐ '}
-                                                {corr.correlationQuality === 'WEAK' && '○ '}
-                                                r={correlationMatrix ? '' : '~'}{corr.avgCorrelation != null && !isNaN(corr.avgCorrelation) ? corr.avgCorrelation.toFixed(2) : '0.7'}
-                                                {correlationMatrix ? ' ✓' : ''}
-                                            </span>
-                                            {corr.hasOpportunity && (
-                                                <span className="text-[8px] font-black text-amber-500 animate-pulse">LAGGING ALERT</span>
+            <tbody>
+                {processedData.map((corr) => (
+                    <React.Fragment key={`${corr.driver}-${corr.note}`}>
+                        {/* Group header: note + correlation quality */}
+                        <tr className="bg-surface-secondary">
+                            <td colSpan={4} className={cn(TD_CLASS, "px-3")}>
+                                <div className="flex items-center justify-between gap-3">
+                                    <span className={cn(
+                                        "truncate text-[11px] font-semibold uppercase tracking-wider",
+                                        corr.hasOpportunity ? "text-warning" : "text-secondary"
+                                    )}>{corr.note}</span>
+                                    <div className="flex shrink-0 items-center gap-2">
+                                        {corr.hasOpportunity && (
+                                            <span className={cn(BADGE_CLASS, "bg-warning-soft text-warning")}>LAGGING ALERT</span>
+                                        )}
+                                        <span
+                                            className={cn(
+                                                BADGE_CLASS,
+                                                "font-mono",
+                                                corr.correlationQuality === 'STRONG'
+                                                    ? "bg-success-soft text-success"
+                                                    : corr.correlationQuality === 'MODERATE'
+                                                    ? "bg-info-soft text-info"
+                                                    : "bg-surface-highlight text-secondary"
                                             )}
-                                            <span className="text-[9px] font-bold text-indigo-400/50 uppercase tracking-tighter">Peak: {(corr.maxChange ?? 0).toFixed(2)}%</span>
-                                        </div>
+                                            title={getBadgeTitle(corr.correlationSource)}
+                                        >
+                                            {corr.avgCorrelation === null
+                                                ? 'veri yok'
+                                                : corr.correlationSource === 'live'
+                                                    ? `r=${corr.avgCorrelation.toFixed(2)}`
+                                                    : `uyum ~${corr.avgCorrelation.toFixed(2)}`}
+                                        </span>
+                                        <span className="w-24 text-right font-mono text-[10px] uppercase text-muted">
+                                            Peak: {corr.maxChange === null ? '—' : `${corr.maxChange.toFixed(2)}%`}
+                                        </span>
                                     </div>
-                                </td>
-                            </tr>
-                            {/* Driver Row */}
-                            {(() => {
-                                const pair = getSymbolPair(corr.driver);
-                                const data = pair ? marketData[pair] : null;
-                                return (
-                                    <ArchitectTableRow
-                                        symbol={corr.driver}
-                                        price={data?.lastPrice}
-                                        change={data?.priceChangePercent}
-                                        isDriver={true}
-                                        role="Catalyst Driver"
-                                    />
-                                );
-                            })()}
-                            {/* Follower Rows */}
-                            {Array.isArray(corr.followers) && corr.followers.filter(f => f && f.symbol).map((f: any, idx: number) => {
-                                const pair = getSymbolPair(f.symbol);
-                                const data = pair ? marketData[pair] : null;
-                                let roleText = f?.isLagging ? "Laggard Follower" : "Follower Pair";
-                                if (f?.correlation != null && !isNaN(f.correlation)) {
-                                    const corrStr = f.correlation > 0 ? `+${f.correlation.toFixed(2)}` : f.correlation.toFixed(2);
-                                    roleText += ` (${corrStr})`;
-                                }
-                                return (
-                                    <ArchitectTableRow
-                                        key={f.symbol || idx}
-                                        symbol={f.symbol}
-                                        price={data?.lastPrice}
-                                        change={data?.priceChangePercent}
-                                        isLagging={f?.isLagging}
-                                        role={roleText}
-                                    />
-                                );
-                            })}
-                        </React.Fragment>
-                    ))}
-                </AnimatePresence>
+                                </div>
+                            </td>
+                        </tr>
+                        {/* Driver Row */}
+                        {(() => {
+                            const data = marketData[getSymbolPair(corr.driver)];
+                            return (
+                                <ArchitectTableRow
+                                    symbol={corr.driver}
+                                    price={data?.lastPrice}
+                                    change={data?.priceChangePercent}
+                                    isDriver={true}
+                                    role="Catalyst Driver"
+                                />
+                            );
+                        })()}
+                        {/* Follower Rows */}
+                        {corr.followers.filter(f => f && f.symbol).map((f, idx) => {
+                            const data = marketData[getSymbolPair(f.symbol)];
+                            let roleText: string;
+                            if (f.correlation === null) {
+                                roleText = f.change === null ? "Takipçi · veri yok" : "Takipçi · sürücü verisi yok";
+                            } else {
+                                roleText = f.isLagging ? "Geride Kalan Takipçi" : "Takipçi";
+                                roleText += f.source === 'live'
+                                    ? ` (r ${formatSigned(f.correlation)})`
+                                    : ` (uyum ~${formatSigned(f.correlation)})`;
+                            }
+                            return (
+                                <ArchitectTableRow
+                                    key={f.symbol || idx}
+                                    symbol={f.symbol}
+                                    price={data?.lastPrice}
+                                    change={data?.priceChangePercent}
+                                    isLagging={f.isLagging}
+                                    role={roleText}
+                                />
+                            );
+                        })}
+                    </React.Fragment>
+                ))}
             </tbody>
         </table>
     );
 };
 
-// Debug component to show correlation data collection status
-const MatrixDebugInfo: React.FC = () => {
-    const { marketData } = useMarketData();
-    const priceHist = getPriceHistory();
-    
-    const symbolsWithData = MAJOR_SYMBOLS.filter(symbol => {
-        const history = priceHist.get(symbol);
-        return history && history.length >= 5;
-    });
-    
-    const availableInMarket = MAJOR_SYMBOLS.filter(s => marketData[s]);
-    
-    return (
-        <div className="bg-white/5 rounded-xl p-4 text-left max-w-md">
-            <div className="text-xs text-gray-400 mb-2">Debug Info:</div>
-            <div className="space-y-1 text-xs">
-                <div className="flex justify-between">
-                    <span className="text-gray-500">Available in MarketData:</span>
-                    <span className="text-emerald-400">{availableInMarket.length}/{MAJOR_SYMBOLS.length}</span>
-                </div>
-                <div className="flex justify-between">
-                    <span className="text-gray-500">Price History (5+ points):</span>
-                    <span className={symbolsWithData.length >= 3 ? "text-emerald-400" : "text-amber-400"}>
-                        {symbolsWithData.length}/{MAJOR_SYMBOLS.length}
-                    </span>
-                </div>
-                {symbolsWithData.length > 0 && (
-                    <div className="pt-2 border-t border-white/10">
-                        <span className="text-gray-500">Ready: </span>
-                        <span className="text-gray-300">{symbolsWithData.slice(0, 5).join(', ')}{symbolsWithData.length > 5 ? '...' : ''}</span>
-                    </div>
-                )}
-            </div>
-        </div>
-    );
-};
+const SORT_BUTTON_CLASS = "group flex w-full items-center gap-0.5 uppercase tracking-wider hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary";
 
 const SortIcon: React.FC<{ active: boolean, direction: 'asc' | 'desc' }> = ({ active, direction }) => {
-    if (!active) return <motion.div className="opacity-0 group-hover:opacity-100 transition-opacity"><TrendingUp size={10} className="text-gray-700" /></motion.div>;
-    return (
-        <motion.div initial={{ scale: 0.8 }} animate={{ scale: 1 }}>
-            {direction === 'asc' ? <TrendingUp size={10} className="text-purple-400" /> : <TrendingDown size={10} className="text-purple-400" />}
-        </motion.div>
-    );
+    if (!active) return <ChevronsUpDown size={10} className="shrink-0 opacity-0 transition-opacity group-hover:opacity-60" />;
+    return direction === 'asc'
+        ? <ChevronUp size={10} className="shrink-0 text-primary" />
+        : <ChevronDown size={10} className="shrink-0 text-primary" />;
 };
 
 const TabButton: React.FC<{ active: boolean; onClick: () => void; icon: React.ReactNode; label: string }> = ({ active, onClick, icon, label }) => (
     <button
+        type="button"
+        role="tab"
+        aria-selected={active}
         onClick={onClick}
         className={cn(
-            "flex items-center gap-2 px-6 py-2 rounded-xl text-xs font-bold transition-all duration-500",
+            "flex h-full shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 text-[11px] font-semibold uppercase tracking-wider transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary",
             active
-                ? "bg-gradient-to-r from-purple-500 to-indigo-500 text-white shadow-lg shadow-purple-500/20"
-                : "text-gray-500 hover:text-gray-300 hover:bg-white/5"
+                ? "border-primary text-text"
+                : "border-transparent text-secondary hover:text-text"
         )}
     >
         {icon}
