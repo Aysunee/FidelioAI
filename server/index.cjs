@@ -1347,6 +1347,8 @@ const ENGINE_COOLDOWN_WRITE_MS = 10 * 1000;
 const ENGINE_BOOTS_KEEP = 50;
 const ENGINE_SIGNAL_SOURCES = ['ALGO_MOMENTUM', 'ALGO_VOLUME', 'ALGO_DIVERGENCE'];
 const ENGINE_KINDS = ['MOMENTUM', 'VOLUME', 'FUNDING'];
+// Symbol of the market-wide aggregate records (utils/signalEngines.ts MARKET_SYMBOL): stored with price 0.
+const ENGINE_MARKET_SYMBOL = 'MARKET';
 const ENGINE_STREAM_KEYS = ['spotMini', 'spotHour', 'futuresMark', 'futuresMini'];
 const SIGNALS_TODAY_CACHE_MS = 15 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1632,8 +1634,11 @@ const publishEngineSignal = async (draft) => {
         engineWarn('bad-signal', '[engine] Geçersiz motor sinyali atlandı.');
         return null;
     }
+    // The burst guard's market-wide aggregates (symbol MARKET, strategy Market_Wide_*) are not a tradable
+    // pair and carry price 0; every other engine record needs a positive price.
+    const marketAggregate = draft.symbol === ENGINE_MARKET_SYMBOL && typeof draft.strategy === 'string' && draft.strategy.startsWith('Market_Wide_');
     const price = Number(draft.price);
-    if (!Number.isFinite(price) || price <= 0 || price >= MAX_PRICE) {
+    if (!Number.isFinite(price) || (marketAggregate ? price < 0 : price <= 0) || price >= MAX_PRICE) {
         engineWarn('bad-price', `[engine] Geçersiz fiyatlı motor sinyali atlandı (${String(draft.symbol).slice(0, 20)}).`);
         return null;
     }

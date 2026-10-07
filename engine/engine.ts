@@ -5,11 +5,21 @@
 // Start-up never announces: every evaluator starts with a fresh state, so its first pass only seeds
 // (records the current condition of every symbol). Cooldown stamps come from the caller (persisted
 // across restarts) and go back through onStateChange whenever a signal fired.
+//
+// Momentum and volume results pass the market-wide burst guard (applyBurstGuard) before onSignals: when
+// the whole market moves, one aggregate 'MARKET' record goes out instead of dozens of single records.
+// The evaluators have already stamped the cooldowns of every candidate, including the held-back ones;
+// momentum entries beyond the per-pass cap that the guard folds into an aggregate (or promotes into the
+// slots that held-back candidates freed) are stamped here.
+// The guard state lives in memory only (a restart starts fresh; the evaluators' seeding prevents
+// re-announcing).
 
 import type { FuturesTicker, Ticker } from '../types';
 import {
     EMPTY_ENGINE_STAT,
+    applyBurstGuard,
     buildFundingRows,
+    createBurstGuardState,
     createFundingEngineState,
     createMomentumState,
     createVolumeState,
@@ -18,6 +28,8 @@ import {
     evaluateVolume,
     sanitizeEngineCooldowns,
     sanitizeSignalSettings,
+    stampMomentumCooldowns,
+    type BurstGuardState,
     type EngineCooldowns,
     type EngineKind,
     type EngineSignal,
@@ -125,6 +137,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
     let momentumState = createMomentumState();
     let volumeState = createVolumeState();
     let fundingState = createFundingEngineState();
+    let burstState: BurstGuardState = createBurstGuardState();
     const stats: { momentum: EngineStat; volume: EngineStat; funding: EngineStat; updatedAt: number } = {
         momentum: EMPTY_ENGINE_STAT,
         volume: EMPTY_ENGINE_STAT,
@@ -173,8 +186,14 @@ export function createEngine(options: CreateEngineOptions): Engine {
         stats.momentum = result.stat;
         stats.updatedAt = t;
         lastScan.momentum = t;
-        if (result.cooldowns !== cooldowns.momentum) commitCooldowns({ ...cooldowns, momentum: result.cooldowns }, t);
-        emit(result.signals, 'momentum');
+        // The evaluator stamped every emitted candidate (also the ones the burst guard holds back); entries
+        // beyond its per-pass cap are stamped only when the guard folds them into a market-wide aggregate
+        // or moves them into the slots that held-back candidates freed (promoted).
+        const guarded = applyBurstGuard('MOMENTUM', result.signals, result.stat.universe, burstState, t, { overflow: result.overflow });
+        burstState = guarded.state;
+        const nextCooldowns = stampMomentumCooldowns(result.cooldowns, [...guarded.folded, ...guarded.promoted], t);
+        if (nextCooldowns !== cooldowns.momentum) commitCooldowns({ ...cooldowns, momentum: nextCooldowns }, t);
+        emit(guarded.signals, 'momentum');
     };
 
     const volumePass = () => {
@@ -190,7 +209,9 @@ export function createEngine(options: CreateEngineOptions): Engine {
         stats.updatedAt = t;
         lastScan.volume = t;
         if (result.cooldowns !== cooldowns.volume) commitCooldowns({ ...cooldowns, volume: result.cooldowns }, t);
-        emit(result.signals, 'volume');
+        const guarded = applyBurstGuard('VOLUME', result.signals, result.stat.universe, burstState, t);
+        burstState = guarded.state;
+        emit(guarded.signals, 'volume');
     };
 
     const fundingPass = () => {
@@ -319,6 +340,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
         momentumState = createMomentumState();
         volumeState = createVolumeState();
         fundingState = createFundingEngineState();
+        burstState = createBurstGuardState();
         stats.momentum = EMPTY_ENGINE_STAT;
         stats.volume = EMPTY_ENGINE_STAT;
         stats.funding = EMPTY_ENGINE_STAT;

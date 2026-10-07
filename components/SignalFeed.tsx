@@ -1,8 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import { Signal, Ticker } from '../types';
-import { Search, ChevronDown, ChevronUp, Zap, ExternalLink, LineChart } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, Zap, ExternalLink, LineChart, Globe } from 'lucide-react';
 import { getStrategyLabel } from '../context/SignalContext';
 import { formatPrice, formatTime as formatClockTime } from '../utils/formatters';
+import { MARKET_SYMBOL } from '../utils/signalEngines';
 
 // ---------------------------------------------------------------------------
 // Signal presentation helpers. One definition for every screen that lists signals
@@ -27,6 +28,13 @@ export const isLocalEngineSignal = (sig: Signal): boolean => {
     const engine = getSignalEngine(sig);
     return engine === 'MOMENTUM' || engine === 'VOLUME' || engine === 'FUNDING';
 };
+
+// Market-wide aggregate of the burst guard (symbol MARKET): not a tradable pair. No coin icon, no price,
+// no change since the signal, no chart / exchange links.
+export const isMarketSignal = (sig: Pick<Signal, 'symbol'>): boolean => sig.symbol === MARKET_SYMBOL;
+
+// "PİYASA" badge shown instead of a coin for market-wide records.
+export const MARKET_BADGE = { text: 'PİYASA', tone: 'bg-info-soft text-info', title: 'Piyasa geneli kayıt: tek bir coin değil, aynı anda koşulu sağlayan coinlerin toplamı.' } as const;
 
 // Funding records come from perpetual contracts; a webhook can mark a perp with a ".P" suffix.
 export const isPerpSignal = (sig: Signal): boolean =>
@@ -152,6 +160,7 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
     // Price change since the signal. Directional records: in favour of the side (+) or against it (−).
     // Neutral records have no side, so the raw change is returned.
     const getChange = (sig: Signal): number | null => {
+        if (isMarketSignal(sig)) return null; // no price, no PnL
         const ticker = marketData[sig.symbol];
         if (!ticker || !(sig.price > 0) || !Number.isFinite(ticker.lastPrice)) return null;
         const rawChange = ((ticker.lastPrice - sig.price) / sig.price) * 100;
@@ -241,6 +250,7 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
 
                         {filteredSignals.map((sig) => {
                             const isExpanded = expandedId === sig.id;
+                            const isMarket = isMarketSignal(sig);
                             const badge = getSideBadge(sig);
                             const isNeutral = badge.kind === 'NEUTRAL';
                             const symbolBase = sig.symbol.replace(/\.P$/, '').replace('USDT', '');
@@ -248,7 +258,7 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                             const magnitude = getMagnitude(sig);
                             const confidence = getPayloadConfidence(sig);
                             const change = getChange(sig);
-                            const ticker = marketData[sig.symbol];
+                            const ticker = isMarket ? undefined : marketData[sig.symbol];
                             // Neutral records are never coloured as a gain or a loss
                             const changeRounded = change === null ? 0 : roundPct(change);
                             const changeTone = change === null || isNeutral ? 'text-text' : changeRounded > 0 ? 'text-success' : changeRounded < 0 ? 'text-danger' : 'text-text';
@@ -273,10 +283,19 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                                             {isExpanded
                                                 ? <ChevronUp size={12} className="shrink-0 text-secondary" />
                                                 : <ChevronDown size={12} className="shrink-0 text-muted" />}
-                                            <div className="h-4 w-4 shrink-0 overflow-hidden rounded-full bg-surface-highlight">
-                                                <img src={iconUrl} className="h-full w-full object-cover" onError={(e) => e.currentTarget.style.display = 'none'} alt={symbolBase} />
-                                            </div>
-                                            <span className="truncate font-medium text-text">{symbolBase}</span>
+                                            {isMarket ? (
+                                                <>
+                                                    <Globe size={14} className="shrink-0 text-info" aria-hidden="true" />
+                                                    <span className={`${BADGE} ${MARKET_BADGE.tone}`} title={MARKET_BADGE.title}>{MARKET_BADGE.text}</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <div className="h-4 w-4 shrink-0 overflow-hidden rounded-full bg-surface-highlight">
+                                                        <img src={iconUrl} className="h-full w-full object-cover" onError={(e) => e.currentTarget.style.display = 'none'} alt={symbolBase} />
+                                                    </div>
+                                                    <span className="truncate font-medium text-text">{symbolBase}</span>
+                                                </>
+                                            )}
                                             <span className={`${BADGE} ${badge.tone}`} title={badge.title}>
                                                 {badge.text}
                                             </span>
@@ -284,7 +303,7 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
 
                                         {/* Signal price */}
                                         <div className="text-right font-mono text-text [@container(min-width:680px)]:order-4">
-                                            ${formatPrice(sig.price)}
+                                            {isMarket ? <span className="text-muted" title="Piyasa geneli kayıt: fiyatı yok">—</span> : `$${formatPrice(sig.price)}`}
                                         </div>
 
                                         {/* Change since the signal */}
@@ -356,47 +375,51 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                                                 )}
                                             </div>
 
-                                            {/* Stats */}
-                                            <div className="grid grid-cols-3 divide-x divide-border border-b border-border">
-                                                <div className="min-w-0 px-3 py-1.5">
-                                                    <div className={STAT_LABEL}>Sinyal fiyatı</div>
-                                                    <div className="truncate font-mono text-xs font-semibold text-text">${formatPrice(sig.price)}</div>
-                                                </div>
-                                                <div className="min-w-0 px-3 py-1.5">
-                                                    <div className={STAT_LABEL}>Güncel fiyat</div>
-                                                    <div className="truncate font-mono text-xs font-semibold text-text">
-                                                        {ticker ? `$${formatPrice(ticker.lastPrice)}` : '—'}
+                                            {/* Stats (a market-wide record has no price: no stats, no links) */}
+                                            {!isMarket && (
+                                                <>
+                                                    <div className="grid grid-cols-3 divide-x divide-border border-b border-border">
+                                                        <div className="min-w-0 px-3 py-1.5">
+                                                            <div className={STAT_LABEL}>Sinyal fiyatı</div>
+                                                            <div className="truncate font-mono text-xs font-semibold text-text">${formatPrice(sig.price)}</div>
+                                                        </div>
+                                                        <div className="min-w-0 px-3 py-1.5">
+                                                            <div className={STAT_LABEL}>Güncel fiyat</div>
+                                                            <div className="truncate font-mono text-xs font-semibold text-text">
+                                                                {ticker ? `$${formatPrice(ticker.lastPrice)}` : '—'}
+                                                            </div>
+                                                        </div>
+                                                        <div className="min-w-0 px-3 py-1.5">
+                                                            <div className={`truncate ${STAT_LABEL}`} title={CHANGE_HINT}>{changeLabel}</div>
+                                                            <div className={`truncate font-mono text-xs font-semibold ${changeTone}`}>
+                                                                {change === null ? '—' : signed(change)}
+                                                            </div>
+                                                        </div>
                                                     </div>
-                                                </div>
-                                                <div className="min-w-0 px-3 py-1.5">
-                                                    <div className={`truncate ${STAT_LABEL}`} title={CHANGE_HINT}>{changeLabel}</div>
-                                                    <div className={`truncate font-mono text-xs font-semibold ${changeTone}`}>
-                                                        {change === null ? '—' : signed(change)}
-                                                    </div>
-                                                </div>
-                                            </div>
 
-                                            {/* Action Buttons */}
-                                            <div className="flex gap-2 px-3 py-1.5">
-                                                <a
-                                                    href={tvLink}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className={LINK_BUTTON}
-                                                >
-                                                    <LineChart size={12} className="text-secondary" />
-                                                    TradingView
-                                                </a>
-                                                <a
-                                                    href={binanceLink}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className={LINK_BUTTON}
-                                                >
-                                                    <ExternalLink size={12} className="text-secondary" />
-                                                    Binance
-                                                </a>
-                                            </div>
+                                                    {/* Action Buttons */}
+                                                    <div className="flex gap-2 px-3 py-1.5">
+                                                        <a
+                                                            href={tvLink}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className={LINK_BUTTON}
+                                                        >
+                                                            <LineChart size={12} className="text-secondary" />
+                                                            TradingView
+                                                        </a>
+                                                        <a
+                                                            href={binanceLink}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className={LINK_BUTTON}
+                                                        >
+                                                            <ExternalLink size={12} className="text-secondary" />
+                                                            Binance
+                                                        </a>
+                                                    </div>
+                                                </>
+                                            )}
                                         </div>
                                     )}
                                 </div>
