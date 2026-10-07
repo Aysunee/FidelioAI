@@ -1,12 +1,12 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { Signal } from '../types';
-import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings, Percent, Activity, Server, Info } from 'lucide-react';
+import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings, Percent, Activity, Server, Info, Globe } from 'lucide-react';
 import { useSignals } from '../context/SignalContext';
 import { useUser } from '../context/UserContext';
 import { Modal } from './ui/Modal';
 import { formatPrice } from '../utils/formatters';
-import { SIGNAL_SETTINGS_LIMITS } from '../utils/signalEngines';
+import { BURST_RULES, SIGNAL_SETTINGS_LIMITS } from '../utils/signalEngines';
 import { FUNDING_THRESHOLDS } from '../utils/fundingSqueeze';
 import {
     ENGINE_SCAN_KEYS,
@@ -23,7 +23,7 @@ import {
     type EngineStatus,
     type EngineStreamState
 } from '../utils/engineApi';
-import { getSideBadge, getSideKind, getSignalLabel, getMagnitude, SideKind } from './SignalFeed';
+import { getSideBadge, getSideKind, getSignalLabel, getMagnitude, isMarketSignal, MARKET_BADGE, SideKind } from './SignalFeed';
 
 // Quote every CSV cell, escape embedded quotes and neutralise spreadsheet formulas
 // (webhook-supplied strategy/note values may start with = + - @). A plain signed number such as
@@ -84,6 +84,10 @@ const FUNDING_FLOOR_PCT = Number((-FUNDING_THRESHOLDS.extremeF8 * 100).toFixed(4
 const FUNDING_FLOOR_TEXT = `${FUNDING_FLOOR_PCT < 0 ? '−' : ''}%${Math.abs(FUNDING_FLOOR_PCT)}`;
 
 const SETTING_FIELDS = Object.keys(SETTING_RULES) as SettingsField[];
+
+// Market-wide burst guard (utils/signalEngines.ts applyBurstGuard), for the dialog text.
+const BURST_WINDOW_MIN = BURST_RULES.windowMs / 60000;
+const BURST_SHARE_PCT = BURST_RULES.universeShare * 100;
 
 const validateField = (field: SettingsField, raw: string): { value: number | null; error: string | null } => {
     const rule = SETTING_RULES[field];
@@ -354,7 +358,8 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
             const magnitude = getMagnitude(s);
             return [
                 s.time, s.symbol, getSideBadge(s).text, magnitude?.text ?? '', magnitude?.caption ?? '',
-                s.price, getSignalLabel(s.strategy), s.strategy, s.note || ''
+                // a market-wide record (MARKET) has no price
+                isMarketSignal(s) ? '' : s.price, getSignalLabel(s.strategy), s.strategy, s.note || ''
             ];
         });
         const csvContent = [headers, ...rows].map(row => row.map(toCsvCell).join(',')).join('\r\n');
@@ -387,6 +392,14 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                         Üç kural sunucuda, günün her saati Binance'in herkese açık verisiyle çalışır; kayıtlar veritabanına yazılır
                         ve her cihazda aynı görünür. Kayıtlar yalnızca ölçülen durumu bildirir; tahmin ya da işlem önerisi değildir.
                         Bir eşik değiştiğinde o kural sessizce yeniden başlar: o an eşiğin ötesinde olan coinler için toplu kayıt açılmaz.
+                    </p>
+                    <p className={RULE_TEXT_CLASS}>
+                        <Globe size={11} className="mr-1 inline-block align-[-1px] text-info" aria-hidden="true" />
+                        Piyasa geneli koruma: aynı yönde son {BURST_WINDOW_MIN} dakikada momentumda {BURST_RULES.limits.MOMENTUM}'dan,
+                        hacimde {BURST_RULES.limits.VOLUME}'den fazla coin koşulu sağlarsa (ya da en az {BURST_RULES.minShareCount} olup izlenen
+                        coinlerin %{BURST_SHARE_PCT}'üne ulaşırsa) tek tek kayıt yerine tek bir "Piyasa" kaydı açılır, hareket durulunca
+                        (30 dakika boyunca {BURST_WINDOW_MIN} dakikada 3'ten az yeni kayıt) bir "bitti" kaydı gelir; fonlamanın sıfırın
+                        hemen altına dönmesi (ör. −%0.01) artık kayıt açmaz, yalnızca uç bölgeye giriş açar.
                     </p>
 
                     <div className="border-t border-border pt-3">
@@ -488,8 +501,8 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                         <p className={RULE_TEXT_CLASS}>
                             Kripto perp kontratlarında tahmini fonlama oranı 8 saatlik eşdeğere çevrilir. Sınır, şu üçünden en negatif
                             olanıdır: girdiğiniz eşik, sabit {FUNDING_FLOOR_TEXT} ve tüm kontratların en negatif %2'lik dilim sınırı. Oran bu
-                            sınırın altına inip en az 60 saniye orada kalırsa ya da işareti pozitiften negatife dönerse kayıt açılır.
-                            Kayıt yönsüzdür. Motor başladığında zaten sınırın altında olan kontratlar için kayıt açılmaz.
+                            sınırın altına inip en az 60 saniye orada kalırsa kayıt açılır; işaretin pozitiften negatife dönmesi tek başına
+                            kayıt açmaz. Kayıt yönsüzdür. Motor başladığında zaten sınırın altında olan kontratlar için kayıt açılmaz.
                         </p>
                         <div className="grid grid-cols-2 gap-3">
                             <SettingInput
@@ -657,6 +670,7 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                             filteredSignals.map((sig) => {
                                 const badge = getSideBadge(sig);
                                 const magnitude = getMagnitude(sig);
+                                const isMarket = isMarketSignal(sig);
                                 const symbolBase = sig.symbol.replace('USDT', '');
                                 const iconUrl = `https://assets.coincap.io/assets/icons/${symbolBase.toLowerCase()}@2x.png`;
 
@@ -666,16 +680,28 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                                             {formatTime(sig.time)}
                                         </td>
                                         <td className={TD_CLASS}>
-                                            <div className="flex items-center gap-1.5">
-                                                <div className="relative h-4 w-4 shrink-0 overflow-hidden rounded-full bg-surface-secondary">
-                                                    <img
-                                                        src={iconUrl}
-                                                        className="absolute inset-0 h-full w-full object-cover"
-                                                        onError={(e) => e.currentTarget.style.display = 'none'}
-                                                    />
+                                            {isMarket ? (
+                                                <div className="flex items-center gap-1.5">
+                                                    <Globe size={14} className="shrink-0 text-info" aria-hidden="true" />
+                                                    <span
+                                                        className={`rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 ${MARKET_BADGE.tone}`}
+                                                        title={MARKET_BADGE.title}
+                                                    >
+                                                        {MARKET_BADGE.text}
+                                                    </span>
                                                 </div>
-                                                <span className="font-medium text-text">{symbolBase}</span>
-                                            </div>
+                                            ) : (
+                                                <div className="flex items-center gap-1.5">
+                                                    <div className="relative h-4 w-4 shrink-0 overflow-hidden rounded-full bg-surface-secondary">
+                                                        <img
+                                                            src={iconUrl}
+                                                            className="absolute inset-0 h-full w-full object-cover"
+                                                            onError={(e) => e.currentTarget.style.display = 'none'}
+                                                        />
+                                                    </div>
+                                                    <span className="font-medium text-text">{symbolBase}</span>
+                                                </div>
+                                            )}
                                         </td>
                                         <td className={TD_CLASS}>
                                             <span
@@ -691,7 +717,7 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                                             {magnitude ? magnitude.text : <span className="font-normal text-muted">—</span>}
                                         </td>
                                         <td className={`${TD_CLASS} text-right font-mono text-text`}>
-                                            {formatPrice(sig.price)}
+                                            {isMarket ? <span className="text-muted" title="Piyasa geneli kayıt: fiyatı yok">—</span> : formatPrice(sig.price)}
                                         </td>
                                         <td className={`${TD_CLASS} text-secondary`}>
                                             {getSignalLabel(sig.strategy)}

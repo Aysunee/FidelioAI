@@ -2,6 +2,7 @@
 // No Express / DB here; the caller passes the bot settings (server: TELEGRAM_* env variables).
 
 import type { EngineLogger, ResponseLike } from './types';
+import { MARKET_SYMBOL, MARKET_WIDE_STRATEGY_LABELS, isMarketWideEndStrategy, isMarketWideStrategy } from '../utils/signalEngines';
 
 export type SignalPriority = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -15,8 +16,19 @@ export const parsePriority = (raw: unknown): SignalPriority | null => {
 export const meetsMinPriority = (priority: SignalPriority, min: SignalPriority): boolean =>
     PRIORITY_RANK[priority] >= PRIORITY_RANK[min];
 
-/** Same rules as the app (getSignalPriority): momentum LOW, volume MEDIUM, funding LOW, shared HIGH. */
-export const signalPriority = (signal: { engine?: string; source?: string }): SignalPriority => {
+/** A market-wide aggregate of the burst guard (symbol MARKET) from the momentum or volume engine. */
+const isMarketAggregate = (signal: { engine?: string; source?: string; symbol?: string; strategy?: string }): boolean =>
+    signal.symbol === MARKET_SYMBOL
+    && isMarketWideStrategy(signal.strategy)
+    && (signal.engine === 'MOMENTUM' || signal.engine === 'VOLUME' || signal.source === 'ALGO_MOMENTUM' || signal.source === 'ALGO_VOLUME');
+
+/**
+ * Same rules as the app (getSignalPriority): momentum LOW, volume MEDIUM, funding LOW, shared HIGH.
+ * A market-wide aggregate is MEDIUM (one notification per market event instead of dozens); its closing
+ * ('bitti') record is LOW.
+ */
+export const signalPriority = (signal: { engine?: string; source?: string; symbol?: string; strategy?: string }): SignalPriority => {
+    if (isMarketAggregate(signal)) return isMarketWideEndStrategy(signal.strategy) ? 'LOW' : 'MEDIUM';
     switch (signal.engine) {
         case 'MOMENTUM': return 'LOW';
         case 'VOLUME': return 'MEDIUM';
@@ -47,6 +59,7 @@ const STRATEGY_LABELS: Record<string, string> = {
     Momentum_24h_Up: '24s Momentum (yükseliş)',
     Momentum_24h_Down: '24s Momentum (düşüş)',
     Funding_Regime_Neg: 'Negatif Fonlama Rejimi',
+    ...MARKET_WIDE_STRATEGY_LABELS,
 };
 
 export const strategyLabel = (strategy: string): string => {
@@ -87,12 +100,15 @@ const formatTime = (iso: string, timeZone: string): string => {
 /** Plain text (no parse_mode): strategy / note may contain '_' or '*'. Mirrors the app's Telegram text. */
 export function buildEngineTelegramText(signal: NotifiableSignal, timeZone = 'Europe/Istanbul'): string {
     const emoji = signal.side === 'NEUTRAL' ? '⚪' : signal.side === 'BUY' || signal.side === 'LONG' ? '🟢' : '🔴';
+    // MARKET is not a pair: no price line.
+    const market = signal.symbol === MARKET_SYMBOL;
     const lines = [
-        `${emoji} ${clean(signal.symbol, 30)} · ${directionText(signal.side)}`,
+        `${emoji} ${market ? 'Piyasa geneli' : clean(signal.symbol, 30)} · ${directionText(signal.side)}`,
         `Strateji: ${clean(strategyLabel(signal.strategy), 120)}`,
     ];
     if (signal.magnitude) lines.push(`Ölçüm: ${clean(`${signal.magnitude.text} (${signal.magnitude.caption})`, 160)}`);
-    lines.push(`Fiyat: $${formatPrice(signal.price)}`, `Zaman: ${formatTime(signal.time, timeZone)}`);
+    if (!market) lines.push(`Fiyat: $${formatPrice(signal.price)}`);
+    lines.push(`Zaman: ${formatTime(signal.time, timeZone)}`);
     if (signal.note) lines.push(`Not: ${clean(signal.note, 500)}`);
     lines.push('(Sunucudaki sinyal motorunun kaydı; işlem önerisi değildir)');
     return lines.join('\n');

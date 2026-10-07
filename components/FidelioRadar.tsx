@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { Ticker, FuturesTicker, MarketIndex } from '../types';
-import { Radar, TrendingUp, TrendingDown, Zap, Droplets, Activity, ChevronDown, Filter, Search, Sparkles } from 'lucide-react';
+import { Radar, TrendingUp, TrendingDown, Zap, Droplets, Activity, ChevronDown, Filter, Search, Sparkles, Globe } from 'lucide-react';
 import { CandleChart } from './CandleChart';
 import { DEFAULT_WATCHLIST } from '../constants';
 import { useSignals } from '../context/SignalContext';
@@ -10,7 +10,7 @@ import { useFundingIntervals, getFundingIntervalHours } from './FundingRates';
 import { BigMoveRadar, bigMovePercent, bigMoveTimeframeText } from './BigMoveRadar';
 import { PerpBigMoveRadar } from './PerpBigMoveRadar';
 import { useCryptoPerpSymbols } from './AnomalyRadar';
-import { getSignalEngine, getSideBadge, getSideKind, getSignalLabel, getMagnitude, SignalEngineKind } from './SignalFeed';
+import { getSignalEngine, getSideBadge, getSideKind, getSignalLabel, getMagnitude, isMarketSignal, MARKET_BADGE, SignalEngineKind } from './SignalFeed';
 import { PatternRadar } from './PatternRadar';
 import { GlobalTicker } from './GlobalTicker';
 
@@ -20,7 +20,7 @@ interface FidelioRadarProps {
     indicesData: MarketIndex[];
 }
 
-type AnomalyType = 'RISE' | 'FALL' | 'NEG_FUNDING' | 'POS_FUNDING' | 'VOLUME_SPIKE';
+type AnomalyType = 'RISE' | 'FALL' | 'NEG_FUNDING' | 'POS_FUNDING' | 'VOLUME_SPIKE' | 'MARKET_WIDE';
 
 interface Anomaly {
     id: string;
@@ -188,11 +188,25 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
             });
         }
 
-        // 4. Volume records of the last 15 minutes (from the signal engine)
+        // 4. Volume records of the last 15 minutes (from the signal engine). A market-wide aggregate
+        //    (symbol MARKET) is one item with its coin count, not a ratio.
         signals.forEach(s => {
             if (getSignalEngine(s) !== 'VOLUME') return;
             const signalTime = new Date(s.time).getTime();
             if (!(now - signalTime < STRIP_WINDOW_MS)) return;
+
+            if (isMarketSignal(s)) {
+                const coins = s.magnitude && Number.isFinite(s.magnitude.value) ? s.magnitude.value : 0;
+                list.push({
+                    id: s.id,
+                    symbol: s.symbol,
+                    type: 'MARKET_WIDE',
+                    value: coins, // rendered as e.g. "12 coin"
+                    message: getSignalLabel(s.strategy),
+                    severity: 'MEDIUM'
+                });
+                return;
+            }
 
             // Prefer the measured magnitude; older records carry the ratio only as "N.Nx"
             // in the strategy key (Volume_Spike_5.4x) or in the note.
@@ -225,12 +239,14 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
             case 'NEG_FUNDING': return { text: 'text-warning', icon: Droplets };
             case 'POS_FUNDING': return { text: 'text-warning', icon: Droplets };
             case 'VOLUME_SPIKE': return { text: 'text-primary', icon: Activity };
+            case 'MARKET_WIDE': return { text: 'text-info', icon: Globe };
             default: return { text: 'text-info', icon: Radar };
         }
     };
 
     const formatAnomalyValue = (anomaly: Anomaly) => {
         if (anomaly.type === 'VOLUME_SPIKE') return `${anomaly.value.toFixed(1)}x`;
+        if (anomaly.type === 'MARKET_WIDE') return `${Math.round(anomaly.value)} coin`;
         const digits = anomaly.type === 'NEG_FUNDING' || anomaly.type === 'POS_FUNDING' ? 3 : 2;
         return `${anomaly.value > 0 ? '+' : ''}${anomaly.value.toFixed(digits)}%`;
     };
@@ -410,16 +426,22 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
                                     const engine = getSignalEngine(signal);
                                     const engineTag = ENGINE_TAG[engine];
                                     const magnitude = getMagnitude(signal);
+                                    // A market-wide record is not a pair: no chart to open, no price.
+                                    const isMarket = isMarketSignal(signal);
                                     return (
                                         <div
                                             key={signal.id}
-                                            onClick={() => setSelectedSymbol(signal.symbol)}
-                                            className="cursor-pointer border-b border-border px-3 py-1 text-xs hover:bg-surface-secondary"
+                                            onClick={isMarket ? undefined : () => setSelectedSymbol(signal.symbol)}
+                                            className={`border-b border-border px-3 py-1 text-xs ${isMarket ? '' : 'cursor-pointer hover:bg-surface-secondary'}`}
                                         >
                                             <div className="flex items-center gap-1.5">
-                                                <span className="truncate font-medium text-text">
-                                                    {signal.symbol.replace('USDT', '')}
-                                                </span>
+                                                {isMarket ? (
+                                                    <span className={`${BADGE} ${MARKET_BADGE.tone}`} title={MARKET_BADGE.title}>{MARKET_BADGE.text}</span>
+                                                ) : (
+                                                    <span className="truncate font-medium text-text">
+                                                        {signal.symbol.replace('USDT', '')}
+                                                    </span>
+                                                )}
                                                 <span className={`${BADGE} ${badge.tone}`} title={badge.title}>
                                                     {badge.text}
                                                 </span>
@@ -433,7 +455,9 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
                                                         {engineTag}
                                                     </span>
                                                 )}
-                                                <span className="ml-auto shrink-0 font-mono text-text">${formatPrice(signal.price)}</span>
+                                                <span className="ml-auto shrink-0 font-mono text-text">
+                                                    {isMarket ? <span className="text-muted">—</span> : `$${formatPrice(signal.price)}`}
+                                                </span>
                                             </div>
 
                                             <div className="flex items-center justify-between gap-2">
@@ -473,14 +497,17 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
                         {anomalies.map(anomaly => {
                             const style = getStyle(anomaly.type);
                             const Icon = style.icon;
+                            const isMarket = anomaly.type === 'MARKET_WIDE';
                             return (
                                 <div
                                     key={anomaly.id}
-                                    onClick={() => setSelectedSymbol(anomaly.symbol)}
-                                    className="grid h-7 min-w-0 cursor-pointer grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-x-1.5 border-b border-border px-3 text-xs transition-colors last:border-b-0 hover:bg-surface-secondary lg:h-10 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:content-center lg:gap-y-0.5 lg:border-b-0"
+                                    onClick={isMarket ? undefined : () => setSelectedSymbol(anomaly.symbol)}
+                                    className={`grid h-7 min-w-0 grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-x-1.5 border-b border-border px-3 text-xs transition-colors last:border-b-0 lg:h-10 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:content-center lg:gap-y-0.5 lg:border-b-0 ${isMarket ? '' : 'cursor-pointer hover:bg-surface-secondary'}`}
                                 >
                                     <Icon size={12} className={`shrink-0 ${style.text}`} />
-                                    <span className="truncate font-medium text-text">{anomaly.symbol.replace('USDT', '')}</span>
+                                    <span className="truncate font-medium text-text" title={isMarket ? MARKET_BADGE.title : undefined}>
+                                        {isMarket ? 'Piyasa' : anomaly.symbol.replace('USDT', '')}
+                                    </span>
                                     <span className="min-w-0 truncate text-[10px] uppercase tracking-wider text-muted lg:order-4 lg:col-span-2" title={anomaly.message}>{anomaly.message}</span>
                                     <span className={`text-right font-mono font-semibold lg:order-3 ${style.text}`}>
                                         {formatAnomalyValue(anomaly)}

@@ -12,10 +12,14 @@ import { getEngineStatus, putEngineSettings, type EngineStatus } from '../utils/
 import {
     DEFAULT_SIGNAL_SETTINGS,
     EMPTY_ENGINE_STATS,
+    MARKET_SYMBOL,
+    MARKET_WIDE_STRATEGY_LABELS,
     SIGNAL_SETTINGS_VERSION,
     STRATEGY_FUNDING_REGIME_NEG,
     STRATEGY_MOMENTUM_DOWN,
     STRATEGY_MOMENTUM_UP,
+    isMarketWideEndStrategy,
+    isMarketWideStrategy,
     moveDirectionLabel,
     sanitizeSignalSettings,
     selectSpotUniverse,
@@ -142,6 +146,9 @@ const STRATEGY_LABELS: Record<string, string> = {
     [STRATEGY_MOMENTUM_UP]: '24s Momentum (yükseliş)',
     [STRATEGY_MOMENTUM_DOWN]: '24s Momentum (düşüş)',
     [STRATEGY_FUNDING_REGIME_NEG]: 'Negatif Fonlama Rejimi',
+    // Market-wide aggregates of the burst guard: 'Piyasa geneli düşüş · 24s momentum',
+    // 'Piyasa geneli hacim artışı · düşüşte', 'Piyasa geneli hacim artışı', '… · bitti'
+    ...MARKET_WIDE_STRATEGY_LABELS,
     RMI_Overbought: '24s Momentum (yükseliş, eski kural)',
     RMI_Oversold: '24s Momentum (düşüş, eski kural)',
     SmartMoney_Divergence: 'Fonlama Uyumsuzluğu (eski kural)'
@@ -158,9 +165,19 @@ export const getStrategyLabel = (strategy: string): string => {
 const PRIORITY_RANK: Record<Priority, number> = { LOW: 1, MEDIUM: 2, HIGH: 3 };
 const meetsMinPriority = (priority: Priority, min: Priority) => PRIORITY_RANK[priority] >= PRIORITY_RANK[min];
 
+// Market-wide aggregate of the burst guard: symbol MARKET (not a tradable pair, price 0), produced by the
+// momentum or volume engine instead of dozens of single records when the whole market moves.
+const isMarketAggregate = (signal: Pick<Signal, 'symbol' | 'strategy' | 'engine' | 'source'>) =>
+    signal.symbol === MARKET_SYMBOL
+    && isMarketWideStrategy(signal.strategy)
+    && (signal.engine === 'MOMENTUM' || signal.engine === 'VOLUME' || signal.source === 'ALGO_MOMENTUM' || signal.source === 'ALGO_VOLUME');
+
 // Shared (webhook / manual) signals are the primary product and count as HIGH. Engine records are
-// descriptive events: momentum and funding LOW, volume MEDIUM. No engine record is HIGH.
+// descriptive events: momentum and funding LOW, volume MEDIUM. No engine record is HIGH. A market-wide
+// aggregate is MEDIUM (one notification per market event instead of dozens), its closing record LOW.
+// Same rules as the server's Telegram (engine/notify.ts signalPriority).
 export const getSignalPriority = (signal: Signal): Priority => {
+    if (isMarketAggregate(signal)) return isMarketWideEndStrategy(signal.strategy) ? 'LOW' : 'MEDIUM';
     switch (signal.engine) {
         case 'MOMENTUM': return 'LOW';
         case 'VOLUME': return 'MEDIUM';
@@ -183,18 +200,21 @@ const isEngineSignal = (signal: Pick<Signal, 'engine'>) =>
 const isAlgoRecord = (signal: Signal) =>
     isEngineSignal(signal) || (typeof signal.source === 'string' && signal.source.startsWith('ALGO_'));
 
-// "BTCUSDT BUY" for shared signals; "BTCUSDT · hareket yönü yukarı" / "BTCUSDT · yönsüz" for engine records.
+// "BTCUSDT BUY" for shared signals; "BTCUSDT · hareket yönü yukarı" / "BTCUSDT · yönsüz" for engine records;
+// "Piyasa geneli · hareket yönü aşağı" for a market-wide aggregate.
 const signalHeadline = (signal: Signal): string => {
     if (isEngineSignal(signal)) {
-        return `${signal.symbol} · ${signal.side === 'NEUTRAL' ? 'yönsüz' : `hareket yönü ${moveDirectionLabel(signal.side)}`}`;
+        const name = signal.symbol === MARKET_SYMBOL ? 'Piyasa geneli' : signal.symbol;
+        return `${name} · ${signal.side === 'NEUTRAL' ? 'yönsüz' : `hareket yönü ${moveDirectionLabel(signal.side)}`}`;
     }
     return `${signal.symbol} ${signal.side === 'NEUTRAL' ? 'Yönsüz' : signal.side}`;
 };
 
 // Strategy label plus the measured size ("24s Momentum (yükseliş) +9.1%"). The volume label already
-// carries its ratio.
+// carries its ratio; a market-wide aggregate adds its coin count ("Piyasa geneli hacim artışı · düşüşte · 12 coin").
 const signalSummary = (signal: Signal): string => {
     const label = getStrategyLabel(signal.strategy);
+    if (signal.magnitude && isMarketAggregate(signal)) return `${label} · ${signal.magnitude.text}`;
     return signal.magnitude && signal.engine !== 'VOLUME' ? `${label} ${signal.magnitude.text}` : label;
 };
 
@@ -421,7 +441,9 @@ const buildTelegramText = (signal: Signal) => {
     if (signal.magnitude) {
         lines.push(`Ölçüm: ${sanitizeTelegramText(`${signal.magnitude.text} (${signal.magnitude.caption})`, 160)}`);
     }
-    lines.push(`Fiyat: $${formatSignalPrice(signal.price)}`, `Zaman: ${timeText}`);
+    // MARKET is not a pair: no price line.
+    if (signal.symbol !== MARKET_SYMBOL) lines.push(`Fiyat: $${formatSignalPrice(signal.price)}`);
+    lines.push(`Zaman: ${timeText}`);
     if (signal.note) lines.push(`Not: ${sanitizeTelegramText(signal.note, 500)}`);
     if (isEngineSignal(signal)) lines.push('(Sinyal motoru kaydı; işlem önerisi değildir)');
     return lines.join('\n');
@@ -677,7 +699,7 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             if (!symbolMatch || !sideMatch) return;
 
             const title = `Alarm: ${signalHeadline(signal)}`;
-            const body = `${label} · $${priceText}`;
+            const body = signal.symbol === MARKET_SYMBOL ? label : `${label} · $${priceText}`;
             if (rule.channels.inApp) addToast(title, body, 'alert');
             if (rule.channels.browser) {
                 // Shown only if browser notifications are enabled in settings and permitted by the browser
@@ -690,7 +712,17 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         const priority = getSignalPriority(signal);
         if (!meetsMinPriority(priority, settings.minPriorityLevel)) return;
 
-        notifySignal(signal.symbol, label, priority, signal.price);
+        if (signal.symbol === MARKET_SYMBOL) {
+            // No coin, no price: notifySignal would show "MARKET sinyali · $0".
+            notificationManager.notify({
+                title: '🎯 Piyasa geneli hareket',
+                body: label,
+                priority,
+                tag: `signal-${MARKET_SYMBOL}`
+            });
+        } else {
+            notifySignal(signal.symbol, label, priority, signal.price);
+        }
         // Engine records (engine field, or an ALGO_* source if the meta row is missing) are sent to
         // Telegram once by the server when it is configured for that. Until the first engine status
         // arrived it is unknown, and the browser rather skips one message than sends a duplicate.
