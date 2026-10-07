@@ -102,8 +102,12 @@ olarak paketler. Paket yoksa sunucu uyarı verir ve motor olmadan çalışmaya d
 - **Tek motor:** Motoru yalnızca MySQL kilidini (`GET_LOCK('fidelio_engine')`, ayrı ve havuza iade edilmeyen bir
   bağlantıda) tutan süreç çalıştırır. İkinci bir süreç (ör. yeniden deploy sırasında eskisiyle çakışan) beklemede kalır ve
   60 sn'de bir yeniden dener; böylece sinyaller iki kez üretilmez. `SIGTERM`/`SIGINT` gelince kilit bırakılır.
-  Lider süreç kilidi 30 sn'de bir doğrular; kilit bağlantısı koparsa veya sorgu 10 sn içinde yanıt vermezse motoru hemen
+  Lider süreç kilidi 5 sn'de bir doğrular; kilit bağlantısı koparsa veya sorgu 10 sn içinde yanıt vermezse motoru hemen
   durdurur ve kilidi yeniden dener.
+- **Birden fazla süreç:** Hostinger uygulamayı aynı anda birkaç Node süreci olarak çalıştırır; her tarayıcı birine bağlı kalır.
+  Her süreç 3 sn'de bir diğer süreçlerin kaydettiği yeni sinyalleri ve silmeleri (`engine_state`: `signals_deleted`,
+  `signals_cleared_at`) okuyup kendi tarayıcılarına bir kez iletir; yeni açılan süreç eski sinyalleri tekrar göndermez. Lider
+  5 sn'de bir `engine_state.leader` kalp atışı yazar; bekleyen süreç durumu onunla verir (`servedBy`, 20 sn'den eskiyse `leaderStale`).
 - **Yerel geliştirme:** Yerel `.env` üretim veritabanına bağlanıyorsa oraya `ENGINE_MODE=off` ekleyin. Aksi halde
   kilidi yerel süreç alabilir; o zaman motor sizin bilgisayarınızda çalışır ve canlı sinyaller yalnızca yerel sunucuya
   bağlı tarayıcılara yayınlanır (bilgisayar uykuya geçerse kilit, MySQL bağlantıyı kapatana kadar bırakılmaz).

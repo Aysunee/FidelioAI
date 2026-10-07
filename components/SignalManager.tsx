@@ -184,7 +184,7 @@ const StatusCell: React.FC<{ label: string; title?: string; className?: string; 
 const engineStateText = (status: EngineStatus | null, error: string | null): string => {
     if (!status) return error ? 'Alınamadı' : 'Bekleniyor';
     if (status.mode === 'off') return 'Kapalı';
-    if (status.role === 'standby') return 'Beklemede';
+    if (status.role === 'standby') return status.leaderStale ? 'Yanıt yok' : 'Beklemede';
     return status.running ? 'Çalışıyor' : 'Çalışmıyor';
 };
 
