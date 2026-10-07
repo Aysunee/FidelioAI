@@ -97,3 +97,36 @@ CREATE TABLE IF NOT EXISTS signal_meta (
     engine VARCHAR(16),
     magnitude TEXT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Forward tracking of every stored signal except the market-wide 'MARKET' aggregates (server/outcomes.cjs).
+-- server/index.cjs creates it at start with CREATE TABLE IF NOT EXISTS like the two tables above.
+--   market    : 'spot' or 'perp' (perp for Funding_* strategies and TradingView symbols ending in '.P', stored without '.P')
+--   t0, p0    : signal time (ms) and signal price
+--   o15 o60 o240 o1440 : one JSON per horizon (15 min, 1 h, 4 h, 24 h), filled by the engine leader from Binance klines:
+--               {"raw", "ret", "net", "excess", "mfe", "mae", "btc", "closeAt", "resolvedAt"} or {"error", "resolvedAt"}
+--               raw = close/p0 - 1, ret = direction x raw, net = ret - round-trip cost (spot 0.20 pct, perp 0.10 pct),
+--               excess = direction x (raw - BTC move over the same window), NEUTRAL signals: ret / net / excess null
+--   next_due  : when the next horizon (or a retry) is due, NULL when finished
+--   status    : 'pending' | 'partial' | 'done' | 'skipped' (no price, symbol not on Binance, implausible price)
+--   attempts  : consecutive failed fetches of the due horizons (6 -> the horizon is stored as {"error"})
+CREATE TABLE IF NOT EXISTS signal_outcomes (
+    signal_id VARCHAR(50) PRIMARY KEY,
+    symbol VARCHAR(32) NOT NULL,
+    market VARCHAR(8) NOT NULL,
+    side VARCHAR(10) NOT NULL,
+    strategy VARCHAR(100),
+    engine VARCHAR(16) NULL,
+    source VARCHAR(50) NULL,
+    t0 BIGINT NOT NULL,
+    p0 DOUBLE NOT NULL,
+    o15 TEXT NULL,
+    o60 TEXT NULL,
+    o240 TEXT NULL,
+    o1440 TEXT NULL,
+    next_due BIGINT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'pending',
+    attempts INT NOT NULL DEFAULT 0,
+    note VARCHAR(255) NULL,
+    INDEX idx_outcomes_next_due (next_due),
+    INDEX idx_outcomes_t0 (t0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

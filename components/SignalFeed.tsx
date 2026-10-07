@@ -1,9 +1,17 @@
 import React, { useState, useMemo } from 'react';
-import { Signal, Ticker } from '../types';
+import { Signal, SignalOutcome, Ticker } from '../types';
 import { Search, ChevronDown, ChevronUp, Zap, ExternalLink, LineChart, Globe } from 'lucide-react';
 import { getStrategyLabel } from '../context/SignalContext';
 import { formatPrice, formatTime as formatClockTime } from '../utils/formatters';
 import { MARKET_SYMBOL } from '../utils/signalEngines';
+import {
+    DEFAULT_OUTCOME_COSTS,
+    OUTCOME_HORIZONS,
+    formatCostPct,
+    formatOutcomePct,
+    outcomeTone,
+    type OutcomeHorizonInfo
+} from '../utils/scorecardApi';
 
 // ---------------------------------------------------------------------------
 // Signal presentation helpers. One definition for every screen that lists signals
@@ -107,6 +115,140 @@ export const getPayloadConfidence = (sig: Signal): number | null => {
     return Math.max(0, Math.min(100, Math.round(percent)));
 };
 
+// --- Outcome after the signal (forward tracking: 15 min, 1 h, 4 h, 24 h) ---
+
+export interface OutcomeCell {
+    text: string;   // "+0.42%", "…" (waiting), "—" (not measured)
+    tone: string;   // text colour class
+    title: string;  // tooltip with every measured value
+}
+
+// "" for today, "yarın " for tomorrow, "12.10 " further ahead (the 24 h horizon ends on the next day).
+const formatDueDay = (due: number): string => {
+    const day = (t: number) => { const d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+    const days = Math.round((day(due) - day(Date.now())) / 86_400_000);
+    if (days <= 0) return '';
+    if (days === 1) return 'yarın ';
+    return `${new Date(due).toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit' })} `;
+};
+
+const signalStart = (sig: Signal): number => {
+    const t = Date.parse(sig.time);
+    return Number.isFinite(t) ? t : NaN;
+};
+
+// One horizon of the strip. Directional records: net result after costs, coloured. Neutral records:
+// raw price change, never coloured as a gain or a loss.
+export const describeOutcomeCell = (sig: Signal, outcome: SignalOutcome, horizon: OutcomeHorizonInfo): OutcomeCell => {
+    const neutral = getSideKind(sig.side) === 'NEUTRAL';
+    const result = outcome[horizon.key];
+    if (outcome.status === 'skipped') {
+        return { text: '—', tone: 'text-muted', title: `${horizon.long} sonrası ölçülmedi — ${outcome.note ?? "sembol Binance'te bulunamadı ya da sinyal fiyatı yok"}.` };
+    }
+    if (!result) {
+        if (outcome.status === 'done') return { text: '—', tone: 'text-muted', title: `${horizon.long} sonrası için ölçüm yok.` };
+        const due = signalStart(sig) + horizon.minutes * 60_000;
+        const when = Number.isFinite(due) && due > Date.now()
+            ? `${formatDueDay(due)}${formatClockTime(due, false)} civarında ölçülecek`
+            : 'ölçüm sırada';
+        return { text: '…', tone: 'text-muted', title: `${horizon.long} sonrası bekleniyor: ${when}.` };
+    }
+    if (result.error) {
+        const reason = result.error.replace(/^[Öö]lçülemedi:?\s*/, '') || 'veri yok';
+        return { text: '—', tone: 'text-muted', title: `${horizon.long} sonrası ölçülemedi — ${reason}.` };
+    }
+    if (neutral) {
+        return {
+            text: formatOutcomePct(result.raw),
+            tone: 'text-secondary',
+            title: [
+                `${horizon.long} sonra · yönsüz kayıt`,
+                `Ham fiyat değişimi ${formatOutcomePct(result.raw)}`,
+                `En yüksek ${formatOutcomePct(result.mfe)} · en düşük ${formatOutcomePct(result.mae)}`,
+                'Yönsüz kayıtta maliyet ve BTC kıyası hesaplanmaz.'
+            ].join('\n')
+        };
+    }
+    return {
+        text: formatOutcomePct(result.net),
+        tone: outcomeTone(result.net),
+        title: [
+            `${horizon.long} sonra · kaydın yönüne göre`,
+            `Net (maliyet sonrası) ${formatOutcomePct(result.net)}`,
+            `Ham fiyat değişimi ${formatOutcomePct(result.raw)}`,
+            `BTC'ye göre ${formatOutcomePct(result.excess)}`,
+            `En iyi (MFE) ${formatOutcomePct(result.mfe)} · en kötü (MAE) ${formatOutcomePct(result.mae)}`
+        ].join('\n')
+    };
+};
+
+// Market-wide records and entries without forward tracking have no outcome.
+export const getSignalOutcome = (sig: Signal): SignalOutcome | null =>
+    isMarketSignal(sig) || !sig.outcome ? null : sig.outcome;
+
+type OutcomeMetric = 'net' | 'raw' | 'excess' | 'mfe' | 'mae';
+
+const DIRECTIONAL_METRICS: { key: OutcomeMetric; label: string; title: string; colored: boolean }[] = [
+    { key: 'net', label: 'Net', title: 'Kaydın yönüne göre, gidiş-dönüş maliyeti düşülmüş getiri', colored: true },
+    { key: 'raw', label: 'Ham', title: 'Ham fiyat değişimi (yönden bağımsız)', colored: false },
+    { key: 'excess', label: "BTC'ye göre", title: 'Kaydın yönüne göre, aynı aralıkta BTC hareketi düşülmüş değişim', colored: true },
+    { key: 'mfe', label: 'En iyi', title: 'Aralık içinde kaydın lehine en uç nokta (MFE)', colored: false },
+    { key: 'mae', label: 'En kötü', title: 'Aralık içinde kaydın aleyhine en uç nokta (MAE)', colored: false }
+];
+
+const NEUTRAL_METRICS: typeof DIRECTIONAL_METRICS = [
+    { key: 'raw', label: 'Ham', title: 'Ham fiyat değişimi', colored: false },
+    { key: 'mfe', label: 'En yüksek', title: 'Aralık içindeki en yüksek fiyatın sinyal fiyatına göre değişimi', colored: false },
+    { key: 'mae', label: 'En düşük', title: 'Aralık içindeki en düşük fiyatın sinyal fiyatına göre değişimi', colored: false }
+];
+
+// Expanded row: every measured value per horizon (the strip's tooltips are not reachable on touch screens).
+const OutcomeDetails: React.FC<{ sig: Signal; outcome: SignalOutcome }> = ({ sig, outcome }) => {
+    const neutral = getSideKind(sig.side) === 'NEUTRAL';
+    const metrics = neutral ? NEUTRAL_METRICS : DIRECTIONAL_METRICS;
+    const cost = isPerpSignal(sig) ? `vadeli ${formatCostPct(DEFAULT_OUTCOME_COSTS.perp)}` : `spot ${formatCostPct(DEFAULT_OUTCOME_COSTS.spot)}`;
+    return (
+        <div className="border-b border-border px-3 py-1.5">
+            <div className="flex items-baseline justify-between gap-2">
+                <h4 className={STAT_LABEL}>Sinyal sonrası</h4>
+                <span className="truncate text-[10px] text-muted">
+                    {neutral ? 'yönsüz · ham değişim' : `maliyet ${cost} gidiş-dönüş`}
+                </span>
+            </div>
+            {outcome.status === 'skipped' ? (
+                <p className="mt-0.5 text-[11px] leading-snug text-muted">
+                    Bu kayıt ölçülmedi — {outcome.note ?? "sembol Binance'te bulunamadı ya da sinyal fiyatı yok"}.
+                </p>
+            ) : (
+                <div className="mt-1 grid grid-cols-[minmax(64px,auto)_repeat(4,minmax(0,1fr))] gap-x-2 gap-y-0.5 text-[10px]">
+                    <span />
+                    {OUTCOME_HORIZONS.map(h => (
+                        <span key={h.key} className="text-right text-muted">{h.label}</span>
+                    ))}
+                    {metrics.map(metric => (
+                        <React.Fragment key={metric.key}>
+                            <span className="truncate text-secondary" title={metric.title}>{metric.label}</span>
+                            {OUTCOME_HORIZONS.map(h => {
+                                const result = outcome[h.key];
+                                if (!result || result.error) {
+                                    const cell = describeOutcomeCell(sig, outcome, h);
+                                    return <span key={h.key} className="text-right font-mono text-muted" title={cell.title}>{cell.text}</span>;
+                                }
+                                const value = result[metric.key];
+                                return (
+                                    <span key={h.key} className={`truncate text-right font-mono ${metric.colored ? outcomeTone(value) : 'text-text'}`}>
+                                        {formatOutcomePct(value)}
+                                    </span>
+                                );
+                            })}
+                        </React.Fragment>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
+
 // ---------------------------------------------------------------------------
 
 interface SignalFeedProps {
@@ -126,14 +268,17 @@ const STAT_LABEL = 'text-[10px] uppercase tracking-wider text-muted';
 const LINK_BUTTON = `flex h-7 items-center gap-1.5 rounded-sm border border-border bg-surface-secondary px-2.5 text-xs font-medium text-text transition-colors hover:bg-surface-highlight ${FOCUS_RING}`;
 
 // The layout follows the width of the panel itself (container queries), not the viewport:
-// a wide panel shows one table line per signal, a narrow one two compact lines.
+// a wide panel shows one table line per signal, a narrow one compact lines (the outcome strip on a third).
 const TABLE_HEAD =
-    'sticky top-0 z-10 hidden h-7 grid-cols-[164px_minmax(0,1fr)_104px_96px_96px_64px] items-center gap-x-3 border-b border-border bg-surface px-3 text-[10px] font-medium uppercase tracking-wider text-muted [@container(min-width:680px)]:grid';
+    'sticky top-0 z-10 hidden h-7 grid-cols-[164px_minmax(0,1fr)_104px_96px_96px_176px_64px] items-center gap-x-3 border-b border-border bg-surface px-3 text-[10px] font-medium uppercase tracking-wider text-muted [@container(min-width:900px)]:grid';
 const ROW =
-    'grid cursor-pointer grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-x-3 px-3 py-1 text-xs [@container(min-width:680px)]:h-7 [@container(min-width:680px)]:grid-cols-[164px_minmax(0,1fr)_104px_96px_96px_64px] [@container(min-width:680px)]:py-0';
+    'grid cursor-pointer grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-x-3 px-3 py-1 text-xs [@container(min-width:900px)]:h-7 [@container(min-width:900px)]:grid-cols-[164px_minmax(0,1fr)_104px_96px_96px_176px_64px] [@container(min-width:900px)]:py-0';
 
 const CHANGE_HINT =
     'Sinyal anındaki fiyata göre değişim. Yönlü kayıtlarda yön lehine (+) ya da aleyhine (−); yönsüz kayıtlarda ham fiyat değişimi.';
+
+const OUTCOME_HINT =
+    `Sinyalden 15 dakika, 1 saat, 4 saat ve 24 saat sonra ölçülen sonuç. Yönlü kayıtlarda maliyet sonrası net getiri (gidiş-dönüş spot ${formatCostPct(DEFAULT_OUTCOME_COSTS.spot)}, vadeli ${formatCostPct(DEFAULT_OUTCOME_COSTS.perp)}); yönsüz kayıtlarda ham fiyat değişimi. … bekleniyor, — ölçülemedi.`;
 
 const TABS: { key: Tab; label: string }[] = [
     { key: 'ALL', label: 'Tümü' },
@@ -245,6 +390,9 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                             <div className="text-right">Büyüklük</div>
                             <div className="text-right">Sinyal fiyatı</div>
                             <div className="text-right" title={CHANGE_HINT}>Sinyalden beri</div>
+                            <div className="grid grid-cols-4 gap-x-1 text-right" title={OUTCOME_HINT}>
+                                {OUTCOME_HORIZONS.map(h => <span key={h.key}>{h.label}</span>)}
+                            </div>
                             <div className="text-right">Saat</div>
                         </div>
 
@@ -263,6 +411,7 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                             const changeRounded = change === null ? 0 : roundPct(change);
                             const changeTone = change === null || isNeutral ? 'text-text' : changeRounded > 0 ? 'text-success' : changeRounded < 0 ? 'text-danger' : 'text-text';
                             const changeLabel = isNeutral ? 'Ham fiyat değişimi' : 'Yöne göre değişim';
+                            const outcome = getSignalOutcome(sig);
 
                             const isFutures = isPerpSignal(sig);
                             const pairSymbol = sig.symbol.replace(/\.P$/, '');
@@ -302,13 +451,13 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                                         </div>
 
                                         {/* Signal price */}
-                                        <div className="text-right font-mono text-text [@container(min-width:680px)]:order-4">
+                                        <div className="text-right font-mono text-text [@container(min-width:900px)]:order-4">
                                             {isMarket ? <span className="text-muted" title="Piyasa geneli kayıt: fiyatı yok">—</span> : `$${formatPrice(sig.price)}`}
                                         </div>
 
                                         {/* Change since the signal */}
                                         <div
-                                            className="flex items-baseline justify-end gap-1 font-mono [@container(min-width:680px)]:order-5"
+                                            className="flex items-baseline justify-end gap-1 font-mono [@container(min-width:900px)]:order-5"
                                             title={isNeutral ? 'Ham fiyat değişimi (yönsüz kayıt)' : 'Sinyalden beri, kaydın yönüne göre değişim'}
                                         >
                                             {change === null ? (
@@ -322,17 +471,17 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                                         </div>
 
                                         {/* Time */}
-                                        <div className="text-right font-mono text-[10px] text-muted [@container(min-width:680px)]:order-6">
+                                        <div className="text-right font-mono text-[10px] text-muted [@container(min-width:900px)]:order-7">
                                             {formatTime(sig.time)}
                                         </div>
 
                                         {/* Rule */}
-                                        <div className="col-span-2 min-w-0 truncate pl-[18px] text-[11px] text-secondary [@container(min-width:680px)]:order-2 [@container(min-width:680px)]:col-span-1 [@container(min-width:680px)]:pl-0">
+                                        <div className="col-span-2 min-w-0 truncate pl-[18px] text-[11px] text-secondary [@container(min-width:900px)]:order-2 [@container(min-width:900px)]:col-span-1 [@container(min-width:900px)]:pl-0">
                                             {getSignalLabel(sig.strategy)}
                                         </div>
 
                                         {/* Magnitude (measured). Webhook / manual records show the confidence only if they sent one. */}
-                                        <div className="col-span-2 flex min-w-0 items-baseline justify-end gap-1 [@container(min-width:680px)]:order-3 [@container(min-width:680px)]:col-span-1">
+                                        <div className="col-span-2 flex min-w-0 items-baseline justify-end gap-1 [@container(min-width:900px)]:order-3 [@container(min-width:900px)]:col-span-1">
                                             {magnitude ? (
                                                 <span className="truncate font-mono text-xs font-semibold text-text" title={magnitude.caption || undefined}>
                                                     {magnitude.text}
@@ -345,6 +494,22 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                                             ) : (
                                                 <span className="font-mono text-muted">—</span>
                                             )}
+                                        </div>
+
+                                        {/* Outcome after the signal: its own line in a narrow panel, a column in a wide one */}
+                                        <div
+                                            className={`${outcome ? 'grid' : 'hidden'} col-span-4 grid-cols-4 gap-x-2 pb-0.5 pl-[18px] [@container(min-width:900px)]:order-6 [@container(min-width:900px)]:col-span-1 [@container(min-width:900px)]:grid [@container(min-width:900px)]:gap-x-1 [@container(min-width:900px)]:pb-0 [@container(min-width:900px)]:pl-0`}
+                                            aria-label={outcome ? 'Sinyal sonrası sonuç' : undefined}
+                                        >
+                                            {outcome && OUTCOME_HORIZONS.map(h => {
+                                                const cell = describeOutcomeCell(sig, outcome, h);
+                                                return (
+                                                    <span key={h.key} className="flex min-w-0 items-baseline gap-1 [@container(min-width:900px)]:justify-end" title={cell.title}>
+                                                        <span className="shrink-0 text-[10px] text-muted [@container(min-width:900px)]:hidden">{h.label}</span>
+                                                        <span className={`truncate font-mono text-[10px] ${cell.tone}`}>{cell.text}</span>
+                                                    </span>
+                                                );
+                                            })}
                                         </div>
                                     </div>
 
@@ -374,6 +539,8 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                                                     </p>
                                                 )}
                                             </div>
+
+                                            {outcome && <OutcomeDetails sig={sig} outcome={outcome} />}
 
                                             {/* Stats (a market-wide record has no price: no stats, no links) */}
                                             {!isMarket && (
