@@ -17,6 +17,7 @@ import { PortfolioProvider } from './context/PortfolioContext';
 import { useKeyboardShortcuts, VIEW_SHORTCUTS } from './hooks/useKeyboardShortcuts';
 import { translations } from './utils/translations';
 import { describeEngineHealth, ENGINE_TONE_DOT } from './utils/engineApi';
+import { DASHBOARD_CHART_ID } from './utils/clickIntent';
 
 // ---------------------------------------------------------------------------
 // Lazily loaded views and modal bodies (keeps the login screen and initial bundle small)
@@ -203,19 +204,30 @@ const DashboardView: React.FC = () => {
     const { watchlist, addToWatchlist, removeFromWatchlist } = useUser();
     const { marketData, futuresData, indicesData } = useMarketData();
     const { signals, priceAlerts, openAlertModal, removePriceAlert } = useSignals();
+    // Symbol of the home page chart; a double click on a coin in any list on this page shows it there.
+    const [chartSymbol, setChartSymbol] = useState('BTCUSDT');
+    const openChart = useCallback((symbol: string) => {
+        setChartSymbol(symbol);
+        // Stacked layout (below lg): bring the chart into view when the double click came from further down.
+        if (typeof window === 'undefined') return;
+        const chart = document.getElementById(DASHBOARD_CHART_ID);
+        if (!chart) return;
+        const rect = chart.getBoundingClientRect();
+        if (rect.top < 0 || rect.top > window.innerHeight - 80) chart.scrollIntoView({ block: 'start' });
+    }, []);
     return (
         // lg+: chart + big-move radars on the left, watchlist over signal feed in a fixed right column.
         // Below lg everything stacks and <main> scrolls.
         <div className="grid w-full shrink-0 grid-cols-1 gap-px bg-border lg:h-full lg:min-h-0 lg:shrink lg:grid-cols-[minmax(0,1fr)_360px] lg:grid-rows-[minmax(0,1fr)]">
             <div className="min-w-0 bg-surface lg:min-h-0 lg:overflow-y-auto lg:overflow-x-hidden">
-                <FidelioRadar spotData={marketData} futuresData={futuresData} indicesData={indicesData} />
+                <FidelioRadar spotData={marketData} futuresData={futuresData} indicesData={indicesData} chartSymbol={chartSymbol} onChartSymbolChange={openChart} />
             </div>
             <div className="grid min-w-0 grid-cols-1 gap-px bg-border md:grid-cols-2 lg:min-h-0 lg:grid-cols-1 lg:grid-rows-[minmax(0,1fr)_minmax(0,1fr)]">
                 <div className="h-[420px] min-h-0 min-w-0 bg-surface lg:h-auto">
-                    <Watchlist symbols={watchlist} data={marketData} activeAlerts={priceAlerts} onAdd={addToWatchlist} onRemove={removeFromWatchlist} onSetAlert={openAlertModal} onRemoveAlert={removePriceAlert} />
+                    <Watchlist symbols={watchlist} data={marketData} activeAlerts={priceAlerts} onAdd={addToWatchlist} onRemove={removeFromWatchlist} onSetAlert={openAlertModal} onRemoveAlert={removePriceAlert} onOpenChart={openChart} />
                 </div>
                 <div className="h-[420px] min-h-0 min-w-0 bg-surface lg:h-auto">
-                    <SignalFeed signals={signals} marketData={marketData} />
+                    <SignalFeed signals={signals} marketData={marketData} onOpenChart={openChart} />
                 </div>
             </div>
         </div>

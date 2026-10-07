@@ -4,6 +4,7 @@ import { Search, ChevronDown, ChevronUp, Zap, ExternalLink, LineChart, Globe } f
 import { getStrategyLabel } from '../context/SignalContext';
 import { formatPrice, formatTime as formatClockTime } from '../utils/formatters';
 import { MARKET_SYMBOL } from '../utils/signalEngines';
+import { isOnControl, OPEN_CHART_HINT, toChartSymbol } from '../utils/clickIntent';
 import {
     DEFAULT_OUTCOME_COSTS,
     OUTCOME_HORIZONS,
@@ -254,6 +255,8 @@ const OutcomeDetails: React.FC<{ sig: Signal; outcome: SignalOutcome }> = ({ sig
 interface SignalFeedProps {
     signals: Signal[];
     marketData: Record<string, Ticker>;
+    /** Double click on a coin: show it in the home page chart. */
+    onOpenChart?: (symbol: string) => void;
 }
 
 type Tab = 'ALL' | 'SPOT' | 'PERP' | 'WEBHOOK';
@@ -297,7 +300,7 @@ const signed = (value: number) => {
     return `${rounded > 0 ? '+' : ''}${rounded.toFixed(2)}%`;
 };
 
-export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) => {
+export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData, onOpenChart }) => {
     const [activeTab, setActiveTab] = useState<Tab>('ALL');
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -424,7 +427,12 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData }) =
                                 <div key={sig.id} className="border-b border-border">
                                     <div
                                         onClick={() => toggleExpand(sig.id)}
-                                        className={`${ROW} ${isExpanded ? 'bg-surface-highlight' : 'hover:bg-surface-secondary'}`}
+                                        // The two clicks of a double click toggle the row back; the chart switches.
+                                        onDoubleClick={onOpenChart && !isMarket ? (e) => {
+                                            if (!isOnControl(e)) onOpenChart(toChartSymbol(sig.symbol, isFutures));
+                                        } : undefined}
+                                        title={onOpenChart && !isMarket ? OPEN_CHART_HINT : undefined}
+                                        className={`${ROW} ${onOpenChart && !isMarket ? 'select-none ' : ''}${isExpanded ? 'bg-surface-highlight' : 'hover:bg-surface-secondary'}`}
                                         style={isExpanded ? { boxShadow: 'inset 2px 0 0 var(--color-brand)' } : undefined}
                                     >
                                         {/* Symbol + side */}

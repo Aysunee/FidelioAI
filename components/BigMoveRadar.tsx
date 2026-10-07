@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useSignals } from '../context/SignalContext';
 import { BigMoveSignal } from '../types';
 import { formatPrice } from '../utils/formatters';
+import { cancelSingleClick, deferSingleClick, isOnControl, OPEN_CHART_HINT, toChartSymbol } from '../utils/clickIntent';
 import { ArrowUpRight, ArrowDownRight, Activity, TrendingUp, TrendingDown, Zap, AlertTriangle, PlayCircle, PauseCircle, Filter, Link, BarChart2, Globe, Search } from 'lucide-react';
 
 const FOCUS_RING = 'focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
@@ -76,7 +77,12 @@ const TYPE_FILTERS: { key: 'ALL' | 'RISE' | 'FALL' | 'HIGH' | 'LOW'; label: stri
     { key: 'LOW', label: '24s dip' }
 ];
 
-export const BigMoveRadar: React.FC = () => {
+interface BigMoveRadarProps {
+    /** Double click on a row: show the coin in the home page chart. */
+    onOpenChart?: (symbol: string) => void;
+}
+
+export const BigMoveRadar: React.FC<BigMoveRadarProps> = ({ onOpenChart }) => {
     const { bigMoves } = useSignals();
     const [isPaused, setIsPaused] = useState(false);
     const [filterType, setFilterType] = useState<'ALL' | 'RISE' | 'FALL' | 'HIGH' | 'LOW' | 'PULLBACK' | 'RALLY'>('ALL');
@@ -205,11 +211,18 @@ export const BigMoveRadar: React.FC = () => {
                     displayMoves.map((move) => (
                         <div
                             key={move.id}
-                            onClick={() => {
+                            onClick={(e) => {
                                 const symbol = move.symbol.replace('USDT', '_USDT');
-                                window.open(`https://www.binance.com/en/trade/${symbol}?type=spot`, '_blank');
+                                const open = () => window.open(`https://www.binance.com/en/trade/${symbol}?type=spot`, '_blank');
+                                if (onOpenChart) deferSingleClick(e, open); else open();
                             }}
-                            className={ROW}
+                            onDoubleClick={onOpenChart ? (e) => {
+                                if (isOnControl(e)) return;
+                                cancelSingleClick();
+                                onOpenChart(toChartSymbol(move.symbol, false));
+                            } : undefined}
+                            title={onOpenChart ? OPEN_CHART_HINT : undefined}
+                            className={onOpenChart ? `${ROW} select-none` : ROW}
                         >
                             <div className="order-1 flex min-w-0 items-center gap-1.5 [@container(min-width:520px)]:order-none">
                                 {getIcon(move.type)}

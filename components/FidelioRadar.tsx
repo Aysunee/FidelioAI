@@ -10,7 +10,8 @@ import { useFundingIntervals, getFundingIntervalHours } from './FundingRates';
 import { BigMoveRadar, bigMovePercent, bigMoveTimeframeText } from './BigMoveRadar';
 import { PerpBigMoveRadar } from './PerpBigMoveRadar';
 import { useCryptoPerpSymbols } from './AnomalyRadar';
-import { getSignalEngine, getSideBadge, getSideKind, getSignalLabel, getMagnitude, isMarketSignal, MARKET_BADGE, SignalEngineKind } from './SignalFeed';
+import { getSignalEngine, getSideBadge, getSideKind, getSignalLabel, getMagnitude, isMarketSignal, isPerpSignal, MARKET_BADGE, SignalEngineKind } from './SignalFeed';
+import { DASHBOARD_CHART_ID, toChartSymbol } from '../utils/clickIntent';
 import { PatternRadar } from './PatternRadar';
 import { GlobalTicker } from './GlobalTicker';
 
@@ -18,6 +19,9 @@ interface FidelioRadarProps {
     spotData: Record<string, Ticker>;
     futuresData: Record<string, FuturesTicker>;
     indicesData: MarketIndex[];
+    /** Chart symbol controlled by the page (TradingView form: 'BTCUSDT' spot, 'BTCUSDT.P' perpetual). */
+    chartSymbol?: string;
+    onChartSymbolChange?: (symbol: string) => void;
 }
 
 type AnomalyType = 'RISE' | 'FALL' | 'NEG_FUNDING' | 'POS_FUNDING' | 'VOLUME_SPIKE' | 'MARKET_WIDE';
@@ -62,7 +66,7 @@ const SEVERITY_TEXT: Record<Anomaly['severity'], string> = { HIGH: 'Büyük', ME
 
 const STRIP_WINDOW_MS = 15 * 60 * 1000;
 
-export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresData, indicesData }) => {
+export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresData, indicesData, chartSymbol, onChartSymbolChange }) => {
     const { signals, bigMoves } = useSignals();
     const { user, setViewMode } = useUser();
     const fundingIntervals = useFundingIntervals();
@@ -91,7 +95,9 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
     }, [signals, searchQuery, filterSource, filterSide]);
 
     // Chart State
-    const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCUSDT');
+    const [ownSymbol, setOwnSymbol] = useState<string>('BTCUSDT');
+    const selectedSymbol = chartSymbol ?? ownSymbol;
+    const setSelectedSymbol = onChartSymbolChange ?? setOwnSymbol;
     const [showSymbolDropdown, setShowSymbolDropdown] = useState(false);
     const [showWebhookInfo, setShowWebhookInfo] = useState(false);
 
@@ -251,13 +257,19 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
         return `${anomaly.value > 0 ? '+' : ''}${anomaly.value.toFixed(digits)}%`;
     };
 
-    const selectedTicker = spotData ? spotData[selectedSymbol] : undefined;
+    // The chart may show a perpetual ('XYZUSDT.P'): its header shows the contract's mark price.
+    const chartPair = selectedSymbol.replace(/\.P$/, '');
+    const isPerpChart = chartPair !== selectedSymbol;
+    const perpTicker = isPerpChart ? futuresData?.[chartPair] : undefined;
+    const selectedTicker = !isPerpChart && spotData ? spotData[chartPair] : undefined;
+    const headerPrice = isPerpChart ? perpTicker?.markPrice : selectedTicker?.lastPrice;
+    const headerChange = isPerpChart ? perpTicker?.priceChangePercent : selectedTicker?.priceChangePercent;
 
     return (
         <div className="grid w-full grid-cols-1 gap-px bg-border lg:h-full lg:max-h-[100dvh] lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_300px] lg:grid-rows-[minmax(0,3fr)_auto_minmax(0,2fr)] xl:grid-cols-[minmax(0,1fr)_340px]">
 
             {/* Chart panel */}
-            <section className="flex h-[400px] min-h-0 min-w-0 flex-col bg-surface lg:h-auto">
+            <section id={DASHBOARD_CHART_ID} className="flex h-[400px] min-h-0 min-w-0 flex-col bg-surface lg:h-auto">
                 <header className="flex h-8 shrink-0 items-stretch border-b border-border">
                     {/* Symbol Selector */}
                     <div className="relative flex shrink-0">
@@ -265,7 +277,8 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
                             onClick={() => setShowSymbolDropdown(!showSymbolDropdown)}
                             className={`flex items-center gap-1 px-3 text-xs font-semibold text-text transition-colors hover:bg-surface-secondary ${FOCUS_RING}`}
                         >
-                            <span>{selectedSymbol.replace('USDT', '')}/USDT</span>
+                            <span>{chartPair.replace(/USDT$/, '')}/USDT</span>
+                            {isPerpChart && <span className="text-[10px] font-semibold text-warning">PERP</span>}
                             <ChevronDown size={12} className="text-secondary" />
                         </button>
 
@@ -295,11 +308,11 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
                     <div className="flex shrink-0 items-center gap-2 border-l border-border px-3 font-mono">
                         <span className="font-sans text-[10px] uppercase tracking-wider text-muted">Price</span>
                         <span className="text-sm font-semibold leading-none text-text">
-                            ${selectedTicker ? formatPrice(selectedTicker.lastPrice) : '...'}
+                            ${typeof headerPrice === 'number' && Number.isFinite(headerPrice) ? formatPrice(headerPrice) : '...'}
                         </span>
-                        {selectedTicker && Number.isFinite(selectedTicker.priceChangePercent) && (
-                            <span className={`text-xs leading-none ${selectedTicker.priceChangePercent > 0 ? 'text-success' : 'text-danger'}`}>
-                                {selectedTicker.priceChangePercent > 0 ? '+' : ''}{selectedTicker.priceChangePercent.toFixed(2)}%
+                        {typeof headerChange === 'number' && Number.isFinite(headerChange) && (
+                            <span className={`text-xs leading-none ${headerChange > 0 ? 'text-success' : 'text-danger'}`}>
+                                {headerChange > 0 ? '+' : ''}{headerChange.toFixed(2)}%
                             </span>
                         )}
                     </div>
@@ -431,7 +444,7 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
                                     return (
                                         <div
                                             key={signal.id}
-                                            onClick={isMarket ? undefined : () => setSelectedSymbol(signal.symbol)}
+                                            onClick={isMarket ? undefined : () => setSelectedSymbol(toChartSymbol(signal.symbol, isPerpSignal(signal)))}
                                             className={`border-b border-border px-3 py-1 text-xs ${isMarket ? '' : 'cursor-pointer hover:bg-surface-secondary'}`}
                                         >
                                             <div className="flex items-center gap-1.5">
@@ -480,7 +493,7 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
                         </div>
                     </>
                 ) : (
-                    <PatternRadar />
+                    <PatternRadar onOpenChart={setSelectedSymbol} />
                 )}
             </section>
 
@@ -501,7 +514,7 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
                             return (
                                 <div
                                     key={anomaly.id}
-                                    onClick={isMarket ? undefined : () => setSelectedSymbol(anomaly.symbol)}
+                                    onClick={isMarket ? undefined : () => setSelectedSymbol(toChartSymbol(anomaly.symbol, anomaly.type === 'NEG_FUNDING' || anomaly.type === 'POS_FUNDING'))}
                                     className={`grid h-7 min-w-0 grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-x-1.5 border-b border-border px-3 text-xs transition-colors last:border-b-0 lg:h-10 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:content-center lg:gap-y-0.5 lg:border-b-0 ${isMarket ? '' : 'cursor-pointer hover:bg-surface-secondary'}`}
                                 >
                                     <Icon size={12} className={`shrink-0 ${style.text}`} />
@@ -533,10 +546,10 @@ export const FidelioRadar: React.FC<FidelioRadarProps> = ({ spotData, futuresDat
             {/* Big Move Radars */}
             <div className="grid min-h-0 min-w-0 grid-cols-1 gap-px lg:col-span-2 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
                 {/* Binance Spot Big Move */}
-                <BigMoveRadar />
+                <BigMoveRadar onOpenChart={setSelectedSymbol} />
 
                 {/* Perp Big Move Radar */}
-                <PerpBigMoveRadar />
+                <PerpBigMoveRadar onOpenChart={setSelectedSymbol} />
             </div>
         </div>
     );

@@ -3,11 +3,17 @@ import { useSignals } from '../context/SignalContext';
 import { DetectedPattern } from '../services/patternScanner';
 import { Flag, TrendingUp, TrendingDown, BarChart2, Link, Globe } from 'lucide-react';
 import { PatternPreviewModal } from './PatternPreviewModal';
+import { cancelSingleClick, deferSingleClick, isOnControl, OPEN_CHART_HINT, toChartSymbol } from '../utils/clickIntent';
 
 const ROW_ACTION =
     'grid h-6 w-6 place-items-center rounded-sm text-secondary transition-colors hover:bg-surface-highlight hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary';
 
-export const PatternRadar: React.FC = () => {
+interface PatternRadarProps {
+    /** Double click on a row: show the coin in the home page chart. */
+    onOpenChart?: (symbol: string) => void;
+}
+
+export const PatternRadar: React.FC<PatternRadarProps> = ({ onOpenChart }) => {
     const { patterns } = useSignals();
     const [selectedPattern, setSelectedPattern] = useState<DetectedPattern | null>(null);
 
@@ -42,8 +48,17 @@ export const PatternRadar: React.FC = () => {
                     patterns.map((pattern) => (
                         <div
                             key={pattern.id}
-                            onClick={() => setSelectedPattern(pattern)}
-                            className="cursor-pointer border-b border-border px-3 py-1 text-xs hover:bg-surface-secondary"
+                            onClick={(e) => {
+                                if (onOpenChart) deferSingleClick(e, () => setSelectedPattern(pattern));
+                                else setSelectedPattern(pattern);
+                            }}
+                            onDoubleClick={onOpenChart ? (e) => {
+                                if (isOnControl(e)) return;
+                                cancelSingleClick();
+                                onOpenChart(toChartSymbol(pattern.symbol, false));
+                            } : undefined}
+                            title={onOpenChart ? OPEN_CHART_HINT : undefined}
+                            className={`cursor-pointer border-b border-border px-3 py-1 text-xs hover:bg-surface-secondary${onOpenChart ? ' select-none' : ''}`}
                         >
                             <div className="flex items-center gap-1.5">
                                 {getPatternIcon(pattern.pattern)}
