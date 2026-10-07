@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useSyncExternalStore } from 'react';
+import React, { useCallback, useMemo, useState, useEffect, useSyncExternalStore } from 'react';
 import { useMarketData } from '../context/MarketContext';
 import { FuturesTicker, Ticker } from '../types';
 import { FundingAnalyzer } from '../utils/AnomalyLogic';
@@ -6,6 +6,8 @@ import { DEFAULT_FUNDING_INTERVAL_HOURS, toEightHourFundingRate, annualizeFundin
 import { Search, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, BarChart3, ChevronsDown, ChevronsUp, Activity } from 'lucide-react';
 import { CandleChart } from './CandleChart';
 import { CoinIcon } from './terminal/CoinIcon';
+import { SplitPane } from './terminal/SplitPane';
+import { SymbolInsightPanel } from './terminal/SymbolInsightPanel';
 
 interface FundingRatesProps {
     data: Record<string, FuturesTicker>;
@@ -182,6 +184,7 @@ interface FundingRowProps {
     history: FundingHistory;
     isSelected: boolean;
     onSelect: (symbol: string) => void;
+    onOpen: (symbol: string) => void; // double click: chart + analysis panels
 }
 
 // Shared by the header and the rows so every column lines up.
@@ -195,7 +198,7 @@ const fundingClass = (rate: number): string =>
     rate > 0 ? 'text-warning' : rate < 0 ? 'text-success' : 'text-muted';
 
 // Memoized row: re-renders only when its own ticker / history / selection changes
-const FundingRow = React.memo<FundingRowProps>(({ ticker, changePct, intervalHours, history, isSelected, onSelect }) => {
+const FundingRow = React.memo<FundingRowProps>(({ ticker, changePct, intervalHours, history, isSelected, onSelect, onOpen }) => {
     const fundingPct = ticker.fundingRate * 100;
     const rate8hPct = toEightHourFundingRate(ticker.fundingRate, intervalHours) * 100;
 
@@ -217,7 +220,9 @@ const FundingRow = React.memo<FundingRowProps>(({ ticker, changePct, intervalHou
     return (
         <div
             onClick={() => onSelect(ticker.symbol)}
-            className={`grid h-7 cursor-pointer items-center gap-x-3 border-b border-border px-3 text-xs ${isSelected
+            onDoubleClick={() => onOpen(ticker.symbol)}
+            title="Çift tıkla: grafik ve analiz panelini aç"
+            className={`grid h-7 cursor-pointer select-none items-center gap-x-3 border-b border-border px-3 text-xs ${isSelected
                 ? 'bg-surface-highlight'
                 : 'hover:bg-surface-secondary'}`}
             style={{
@@ -315,6 +320,10 @@ export const FundingRates: React.FC<FundingRatesProps> = ({ data, spotData }) =>
     const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
     const [showCharts, setShowCharts] = useState(false);
     const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+    const openDetail = useCallback((symbol: string) => {
+        setSelectedSymbol(symbol);
+        setShowCharts(true);
+    }, []);
     const fundingIntervals = useFundingIntervals();
     const futures24h = useFutures24hStats();
 
@@ -554,6 +563,7 @@ export const FundingRates: React.FC<FundingRatesProps> = ({ data, spotData }) =>
                                     history={fundingHistory[row.ticker.symbol] || EMPTY_HISTORY}
                                     isSelected={selectedSymbol === row.ticker.symbol}
                                     onSelect={setSelectedSymbol}
+                                    onOpen={openDetail}
                                 />
                             ))}
                             {sortedList.length > visibleCount && (
@@ -568,10 +578,22 @@ export const FundingRates: React.FC<FundingRatesProps> = ({ data, spotData }) =>
                     </div>
                 </section>
 
-                {/* Chart panel (beside the table at lg+, above it on small screens) */}
-                {selectedTicker && showCharts && (
-                    <div className="order-first h-[300px] min-w-0 shrink-0 overflow-hidden bg-surface lg:order-none lg:h-auto lg:w-[46%]">
-                        <CandleChart symbol={`${selectedTicker.symbol}.P`} id={`detail-chart-${selectedTicker.symbol}`} />
+                {/* Detail column (beside the table at lg+, above it on small screens): TradingView chart on top,
+                    the Terminal's Funding akışı / Kurulum / Duyarlılık panels below. Double click a row to open it. */}
+                {selectedSymbol && showCharts && (
+                    <div className="order-first h-[640px] min-w-0 shrink-0 overflow-hidden bg-surface lg:order-none lg:h-auto lg:w-[46%]">
+                        <SplitPane
+                            direction="vertical"
+                            storageKey="fidelio_funding_detail_split"
+                            defaultSizes={[58, 42]}
+                            minSizesPx={[200, 160]}
+                            className="h-full w-full"
+                        >
+                            <div className="h-full min-h-0 bg-surface">
+                                <CandleChart symbol={`${selectedSymbol}.P`} id={`detail-chart-${selectedSymbol}`} />
+                            </div>
+                            <SymbolInsightPanel symbol={selectedSymbol} onSelect={setSelectedSymbol} />
+                        </SplitPane>
                     </div>
                 )}
             </div>

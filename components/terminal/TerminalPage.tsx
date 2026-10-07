@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCw, TriangleAlert } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 import type { ChartInterval, FuturesRow } from './types';
 import { fetchFuturesUniverse, prefetchKlines, subscribeFuturesTickers } from './terminalData';
 import { TerminalChart } from './TerminalChart';
@@ -10,6 +10,8 @@ import { FundingFlowPanel } from './FundingFlowPanel';
 import { SqueezeChecklist } from './SqueezeChecklist';
 import { feedFundingRows } from './fundingFlow';
 import { SplitPane } from './SplitPane';
+import { applyPatch } from './universePatch';
+import { BottomTabStrip, PanelBoundary, readStoredTab, tabId, tabPanelId, writeStoredTab, type BottomTab } from './bottomTabs';
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -54,189 +56,6 @@ const writeStoredSymbol = (symbol: string): void => {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Bottom area tabs (right column, under the symbol header)
-// ---------------------------------------------------------------------------
-
-type BottomTab = 'funding' | 'checklist' | 'sentiment';
-
-// Labels are typed in capitals: CSS `uppercase` under lang="tr" would render 'Funding' as 'FUNDİNG'.
-const BOTTOM_TABS: ReadonlyArray<{ key: BottomTab; label: string; title: string }> = [
-    { key: 'funding', label: 'FUNDING AKIŞI', title: 'Uç funding adayları ve funding olayları (durum tespiti, tahmin değildir)' },
-    { key: 'checklist', label: 'KURULUM', title: 'Seçili sembol için short sıkışması kurulum koşulları ve fonlama geçmişi' },
-    { key: 'sentiment', label: 'DUYARLILIK', title: 'Seçili sembolün piyasa duyarlılığı (emir defteri, long/short oranları)' },
-];
-const DEFAULT_TAB: BottomTab = 'funding';
-
-const isBottomTab = (value: unknown): value is BottomTab =>
-    value === 'funding' || value === 'checklist' || value === 'sentiment';
-
-const tabId = (tab: BottomTab): string => `terminal-bottom-tab-${tab}`;
-const tabPanelId = (tab: BottomTab): string => `terminal-bottom-panel-${tab}`;
-
-const readStoredTab = (): BottomTab => {
-    if (typeof window === 'undefined') return DEFAULT_TAB;
-    try {
-        const stored = window.localStorage.getItem(TAB_STORAGE_KEY);
-        if (isBottomTab(stored)) return stored;
-    } catch {
-        /* storage blocked */
-    }
-    return DEFAULT_TAB;
-};
-
-const writeStoredTab = (tab: BottomTab): void => {
-    if (typeof window === 'undefined') return;
-    try {
-        window.localStorage.setItem(TAB_STORAGE_KEY, tab);
-    } catch {
-        /* storage blocked or full: the tab simply is not remembered */
-    }
-};
-
-interface BottomTabStripProps {
-    active: BottomTab;
-    onChange: (tab: BottomTab) => void;
-}
-
-/**
- * Tab strip of the bottom area. It is rendered INSIDE the active panel's header row (in place of the panel
- * title), so the panel keeps its own controls on the right and there is no second header.
- */
-const BottomTabStrip: React.FC<BottomTabStripProps> = ({ active, onChange }) => {
-    const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
-        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
-        e.preventDefault();
-        const index = BOTTOM_TABS.findIndex((t) => t.key === active);
-        const last = BOTTOM_TABS.length - 1;
-        const next =
-            e.key === 'Home' ? 0 : e.key === 'End' ? last : e.key === 'ArrowLeft' ? (index <= 0 ? last : index - 1) : index >= last ? 0 : index + 1;
-        onChange(BOTTOM_TABS[next].key);
-    };
-
-    return (
-        <div role="tablist" aria-label="Alt panel" className="-ml-2 flex h-8 min-w-0 items-stretch">
-            {BOTTOM_TABS.map((tab) => {
-                const selected = tab.key === active;
-                return (
-                    <button
-                        key={tab.key}
-                        type="button"
-                        role="tab"
-                        id={tabId(tab.key)}
-                        aria-selected={selected}
-                        aria-controls={tabPanelId(tab.key)}
-                        tabIndex={selected ? 0 : -1}
-                        title={tab.title}
-                        onClick={() => onChange(tab.key)}
-                        onKeyDown={onKeyDown}
-                        className={`flex h-8 shrink-0 items-center whitespace-nowrap px-2 text-[11px] font-semibold uppercase tracking-wider outline-none transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-primary ${
-                            selected ? 'text-text shadow-[inset_0_-2px_0_var(--color-brand)]' : 'text-secondary hover:text-text'
-                        }`}
-                    >
-                        {tab.label}
-                    </button>
-                );
-            })}
-        </div>
-    );
-};
-
-/** Returns the same object when the patch changes nothing, so memoized rows skip re-rendering. */
-const mergeRow = (row: FuturesRow, patch: Partial<FuturesRow>): FuturesRow => {
-    let next: FuturesRow | null = null;
-    for (const key of Object.keys(patch) as Array<keyof FuturesRow>) {
-        const value = patch[key];
-        if (value === undefined || value === row[key]) continue;
-        if (!next) next = { ...row };
-        (next as unknown as Record<string, unknown>)[key] = value;
-    }
-    return next ?? row;
-};
-
-const applyPatch = (
-    prev: FuturesRow[],
-    patch: Record<string, Partial<FuturesRow>>,
-    index: Map<string, number>,
-): FuturesRow[] => {
-    if (!prev.length) return prev;
-    let next: FuturesRow[] | null = null;
-    for (const symbol of Object.keys(patch)) {
-        const i = index.get(symbol);
-        if (i === undefined) continue;
-        const current = (next ?? prev)[i];
-        if (!current || current.symbol !== symbol) continue; // index belongs to another universe snapshot
-        const merged = mergeRow(current, patch[symbol]);
-        if (merged === current) continue;
-        if (!next) next = prev.slice();
-        next[i] = merged;
-    }
-    return next ?? prev;
-};
-
-// ---------------------------------------------------------------------------
-// Panel error boundary: one failing panel must not take the whole terminal down.
-// ---------------------------------------------------------------------------
-
-interface PanelBoundaryProps {
-    name: string;
-    /** Rendered in a header row above the fallback, so e.g. a tab strip stays usable when its panel fails. */
-    fallbackHeader?: React.ReactNode;
-    children?: React.ReactNode;
-}
-
-interface PanelBoundaryState {
-    failed: boolean;
-}
-
-class PanelBoundary extends React.Component<PanelBoundaryProps, PanelBoundaryState> {
-    state: PanelBoundaryState = { failed: false };
-
-    static getDerivedStateFromError(): PanelBoundaryState {
-        return { failed: true };
-    }
-
-    componentDidCatch(error: unknown): void {
-        console.error(`[Terminal] ${this.props.name} hatası`, error);
-    }
-
-    private retry = (): void => {
-        this.setState({ failed: false });
-    };
-
-    render(): React.ReactNode {
-        if (!this.state.failed) return this.props.children;
-        const alert = (
-            <div
-                role="alert"
-                className="flex h-full min-h-[120px] w-full flex-col items-center justify-center gap-2 bg-surface p-3 text-center"
-            >
-                <p className="flex items-center gap-1.5 text-xs text-muted">
-                    <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden="true" />
-                    <span>{this.props.name} gösterilirken bir hata oluştu.</span>
-                </p>
-                <button
-                    type="button"
-                    onClick={this.retry}
-                    className="inline-flex h-7 items-center gap-1 rounded-sm border border-border bg-surface-secondary px-2.5 text-xs font-medium text-text outline-none transition-colors hover:bg-surface-highlight focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary"
-                >
-                    <RefreshCw className="h-3 w-3" aria-hidden="true" />
-                    Tekrar dene
-                </button>
-            </div>
-        );
-        if (!this.props.fallbackHeader) return alert;
-        return (
-            <div className="flex h-full min-h-0 w-full flex-col bg-surface">
-                <header className="flex h-8 shrink-0 items-center border-b border-border px-3">
-                    <div className="flex h-8 min-w-0 flex-1 items-center">{this.props.fallbackHeader}</div>
-                </header>
-                <div className="min-h-0 flex-1">{alert}</div>
-            </div>
-        );
-    }
-}
-
 // The page re-renders once per second with ticker patches; the sentiment panel only depends on the symbol.
 const SentimentPanel = memo(TerminalSentimentPanel);
 
@@ -268,7 +87,7 @@ export const TerminalPage: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [selectedSymbol, setSelectedSymbol] = useState<string>(readStoredSymbol);
-    const [bottomTab, setBottomTab] = useState<BottomTab>(readStoredTab);
+    const [bottomTab, setBottomTab] = useState<BottomTab>(() => readStoredTab(TAB_STORAGE_KEY));
 
     // symbol -> position in `rows`. Patches only replace elements, so positions never change
     // until a new universe snapshot arrives.
@@ -422,7 +241,7 @@ export const TerminalPage: React.FC = () => {
     }, []);
 
     useEffect(() => {
-        writeStoredTab(bottomTab);
+        writeStoredTab(TAB_STORAGE_KEY, bottomTab);
         if (!refocusTabRef.current || typeof document === 'undefined') return;
         refocusTabRef.current = false;
         document.getElementById(tabId(bottomTab))?.focus();

@@ -90,7 +90,9 @@ export const CandleChart: React.FC<CandleChartProps> = ({ symbol, id }) => {
                     toolbar_bg: surface,
                     enable_publishing: false,
                     allow_symbol_change: true,
-                    hide_top_toolbar: false,
+                    // The embedded widget's top toolbar renders as an empty strip above the chart; the
+                    // date-range bar at the bottom (withdateranges) still switches the timeframe.
+                    hide_top_toolbar: true,
                     hide_side_toolbar: false,
                     withdateranges: true,
                     save_image: true,
