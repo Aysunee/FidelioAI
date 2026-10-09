@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useMemo, ReactNode } from 'react';
 import { Ticker, FuturesTicker, MarketIndex, Liquidation } from '../types';
-import { connectToBinance, connectToBinanceFutures, startGlobalMarketPoller, connectToLiquidations, StreamStatus } from '../services/marketData';
+import { connectToBinance, connectToBinanceFutures, startGlobalMarketPoller, connectToLiquidations, fetchSpotTickerSnapshot, StreamStatus } from '../services/marketData';
 
 type ConnectionStatus = 'connected' | 'disconnected' | 'connecting';
 type FundingHistory = Record<string, { time: number, rate: number }[]>;
@@ -142,7 +142,16 @@ export const MarketProvider: React.FC<{ children: ReactNode; enabled?: boolean }
                 setSpotStatus(status);
             }
         );
+        // Thinly traded coins have no stream data until their next trade: fill them from one REST
+        // snapshot. Stream values already received are newer and win.
+        const snapshotAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        fetchSpotTickerSnapshot(snapshotAbort?.signal)
+            .then(snapshot => setMarketData(prev => ({ ...snapshot, ...prev })))
+            .catch(err => {
+                if ((err as { name?: string })?.name !== 'AbortError') console.warn('[Market] Spot 24s özeti alınamadı:', err);
+            });
         return () => {
+            snapshotAbort?.abort();
             disconnect();
             spotStatusRef.current = 'disconnected';
             setSpotStatus('disconnected');

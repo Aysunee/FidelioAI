@@ -200,6 +200,52 @@ export const connectToBinance = (
   };
 };
 
+// --- Binance Spot 24h snapshot (REST) ---
+// `!miniTicker@arr` only carries symbols that changed in the last second, so a thinly traded coin has no
+// data until its next trade. One REST snapshot at start fills those gaps. Symbols that are no longer
+// trading (break / delisted) stay in /ticker/24hr with frozen values: they are skipped (no trades in
+// the window or a window that ended long ago).
+type Ticker24hMini = {
+  symbol: string;
+  openPrice: string;
+  highPrice: string;
+  lowPrice: string;
+  lastPrice: string;
+  quoteVolume: string;
+  closeTime: number;
+  count: number;
+};
+
+const SPOT_SNAPSHOT_URL = 'https://api.binance.com/api/v3/ticker/24hr?type=MINI';
+const SNAPSHOT_MAX_AGE_MS = 60 * 60 * 1000;
+
+export const fetchSpotTickerSnapshot = async (signal?: AbortSignal): Promise<Record<string, Ticker>> => {
+  const response = await fetch(SPOT_SNAPSHOT_URL, { headers: { Accept: 'application/json' }, signal });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const body: unknown = await response.json();
+  if (!Array.isArray(body)) throw new Error('Beklenmeyen yanıt');
+  const now = Date.now();
+  const tickers: Record<string, Ticker> = {};
+  for (const t of body as Ticker24hMini[]) {
+    if (!t?.symbol || !(Number(t.count) > 0) || !(now - Number(t.closeTime) < SNAPSHOT_MAX_AGE_MS)) continue;
+    const open = parseFloat(t.openPrice);
+    const last = parseFloat(t.lastPrice);
+    if (!Number.isFinite(open) || !Number.isFinite(last) || open <= 0) continue;
+    tickers[t.symbol] = {
+      symbol: t.symbol,
+      lastPrice: last,
+      openPrice: open,
+      highPrice: parseFloat(t.highPrice),
+      lowPrice: parseFloat(t.lowPrice),
+      // Same formula as the miniTicker stream above
+      priceChangePercent: ((last - open) / open) * 100,
+      volume: parseFloat(t.quoteVolume),
+      updatedAt: Number(t.closeTime)
+    };
+  }
+  return tickers;
+};
+
 // --- Binance Spot rolling 1h ticker (`!ticker_1h@arr`) ---
 // Statistics of the trailing hour for every symbol that traded in the last second. Payload verified
 // live: e ('1hTicker'), E, s, p, P, w, o, h, l, c, v, q, O (window open, minute aligned), C, F, L, n.
