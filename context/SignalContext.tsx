@@ -9,6 +9,7 @@ import { getCryptoPerpSymbols, getCryptoPerpSymbolsSync } from '../services/mark
 import { SOCKET_URL, ApiError, apiJson } from '../utils/config';
 import { readScoped, writeScoped } from '../utils/userStorage';
 import { getEngineStatus, putEngineSettings, type EngineStatus } from '../utils/engineApi';
+import { mergeSignalOutcome, normalizeSignalOutcome } from '../utils/scorecardApi';
 import {
     DEFAULT_SIGNAL_SETTINGS,
     EMPTY_ENGINE_STATS,
@@ -116,6 +117,10 @@ const TELEGRAM_MAX_PER_MINUTE = 20;
 
 // Server engine status: polled while the tab is visible (paused when hidden, refreshed on return).
 const ENGINE_STATUS_POLL_MS = 15000;
+// Signal history (with the outcomes measured since) is fetched again this often while the tab is visible;
+// outcomes resolved by another server process only reach this browser this way.
+const HISTORY_REFRESH_MS = 5 * 60 * 1000;
+const HISTORY_REFRESH_CHECK_MS = 60 * 1000;
 const FUTURES_META_POLL_MS = 60000;        // cached for an hour inside the service; this only retries failures
 // Futures rows older than this are not evaluated (stream down or the tab just woke up).
 const FUTURES_FRESH_MS = 90000;
@@ -347,10 +352,16 @@ const normalizeMagnitude = (raw: unknown): Signal['magnitude'] => {
     };
 };
 
+// Server ids can never be mistaken for browser-local ones.
+const toClientSignalId = (raw: unknown): string => {
+    const id = typeof raw === 'string' || typeof raw === 'number' ? String(raw) : '';
+    return id.startsWith(LOCAL_ID_PREFIX) ? `srv_${id}` : id;
+};
+
 // Validates a signal coming from the server (history or socket) before it reaches the UI.
 const normalizeServerSignal = (raw: unknown): Signal | null => {
     if (!isRecord(raw)) return null;
-    const id = typeof raw.id === 'string' || typeof raw.id === 'number' ? String(raw.id) : '';
+    const id = toClientSignalId(raw.id);
     const symbol = typeof raw.symbol === 'string' ? raw.symbol.trim().toUpperCase() : '';
     const side = (typeof raw.side === 'string' ? raw.side.trim().toUpperCase() : '') as Side;
     const price = Number(raw.price);
@@ -364,9 +375,10 @@ const normalizeServerSignal = (raw: unknown): Signal | null => {
         ? source
         : sourceEngine && raw.engine === sourceEngine ? sourceEngine : undefined;
     const isEngine = engine === 'MOMENTUM' || engine === 'VOLUME' || engine === 'FUNDING';
+    // What happened after the signal (forward tracking). A market-wide record is not tracked.
+    const outcome = symbol === MARKET_SYMBOL ? undefined : normalizeSignalOutcome(raw.outcome);
     return {
-        // Server ids can never be mistaken for browser-local ones
-        id: id.startsWith(LOCAL_ID_PREFIX) ? `srv_${id}` : id,
+        id,
         strategy: typeof raw.strategy === 'string' && raw.strategy.trim() ? raw.strategy : 'Webhook',
         symbol,
         side,
@@ -377,15 +389,30 @@ const normalizeServerSignal = (raw: unknown): Signal | null => {
         confidence: !isEngine && Number.isFinite(confidence) ? confidence : undefined,
         source,
         engine,
-        magnitude: isEngine ? normalizeMagnitude(raw.magnitude) : undefined
+        magnitude: isEngine ? normalizeMagnitude(raw.magnitude) : undefined,
+        ...(outcome ? { outcome } : {})
     };
+};
+
+// Keeps outcome horizons this browser already knows (e.g. from a 'signal_outcome' event that arrived
+// while a history request was in flight): a resolved horizon never becomes unresolved again.
+const withKnownOutcomes = (incoming: Signal[], known: Signal[]): Signal[] => {
+    const outcomes = new Map<string, NonNullable<Signal['outcome']>>();
+    known.forEach(signal => { if (signal.outcome) outcomes.set(signal.id, signal.outcome); });
+    if (outcomes.size === 0) return incoming;
+    return incoming.map(signal => {
+        const prev = outcomes.get(signal.id);
+        if (!prev) return signal;
+        const outcome = mergeSignalOutcome(prev, signal.outcome);
+        return outcome === signal.outcome ? signal : { ...signal, outcome };
+    });
 };
 
 // Merge by id (incoming wins), newest first, with separate caps so engine records can never push
 // shared (webhook/manual) signals out of the list.
 const mergeSignals = (prev: Signal[], incoming: Signal[]): Signal[] => {
     const byId = new Map<string, Signal>();
-    [...incoming, ...prev].forEach(signal => {
+    [...withKnownOutcomes(incoming, prev), ...prev].forEach(signal => {
         if (!byId.has(signal.id)) byId.set(signal.id, signal);
     });
     const sorted = Array.from(byId.values()).sort((a, b) => signalTime(b) - signalTime(a));
@@ -843,8 +870,10 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         let historySeq = 0;
         const live = { added: new Set<string>(), removed: new Set<string>(), cleared: false };
 
+        let lastHistoryAt = 0;
         const fetchHistory = async () => {
             const seq = ++historySeq;
+            lastHistoryAt = Date.now();
             live.added.clear();
             live.removed.clear();
             live.cleared = false;
@@ -859,7 +888,11 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                 const serverList = live.cleared ? [] : valid.filter(s => !live.removed.has(s.id));
                 // The server list is the source of truth (picks up deletes/clears missed while the
                 // socket was down); browser-local entries and live arrivals during the request stay.
-                setSignals(prev => mergeSignals(prev.filter(s => isLocalSignal(s) || added.has(s.id)), serverList));
+                // Outcome horizons already known here are kept (the snapshot may predate an event).
+                setSignals(prev => mergeSignals(
+                    prev.filter(s => isLocalSignal(s) || added.has(s.id)),
+                    withKnownOutcomes(serverList, prev)
+                ));
             } catch (err) {
                 console.error('Sinyal geçmişi alınamadı:', err instanceof Error ? err.message : err);
             }
@@ -906,8 +939,36 @@ export const SignalProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             setSignals(prev => prev.filter(isLocalSignal));
         });
 
+        // A horizon of a stored signal was measured (15 min / 1 h / 4 h / 24 h after it).
+        socket.on('signal_outcome', (payload: unknown) => {
+            if (!isRecord(payload)) return;
+            const target = toClientSignalId(payload.id);
+            const outcome = normalizeSignalOutcome(payload.outcome);
+            if (!target || !outcome) return;
+            setSignals(prev => {
+                const index = prev.findIndex(s => s.id === target);
+                if (index === -1 || prev[index].symbol === MARKET_SYMBOL) return prev;
+                const merged = mergeSignalOutcome(prev[index].outcome, outcome);
+                if (merged === prev[index].outcome) return prev;
+                const next = prev.slice();
+                next[index] = { ...prev[index], outcome: merged };
+                return next;
+            });
+        });
+
+        // Periodic history refresh while the tab is visible (outcomes resolved by another server
+        // process, rows missed by the socket). A hidden tab catches up when it becomes visible.
+        const refreshIfDue = () => {
+            if (disposed || typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+            if (Date.now() - lastHistoryAt >= HISTORY_REFRESH_MS) fetchHistory();
+        };
+        const refreshTimer = typeof window !== 'undefined' ? window.setInterval(refreshIfDue, HISTORY_REFRESH_CHECK_MS) : null;
+        if (typeof document !== 'undefined') document.addEventListener('visibilitychange', refreshIfDue);
+
         return () => {
             disposed = true;
+            if (refreshTimer !== null) window.clearInterval(refreshTimer);
+            if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', refreshIfDue);
             socket.disconnect();
         };
     }, [isAuthenticated, addToast, dispatchSignalNotifications]);

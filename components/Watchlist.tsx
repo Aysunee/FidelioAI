@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Ticker, PriceAlert } from '../types';
 import { Plus, Trash2, Bell, Search, LineChart, ExternalLink, LayoutGrid, List, ChevronUp, ChevronDown } from 'lucide-react';
 import { formatPrice, formatTime } from '../utils/formatters';
+import { cancelSingleClick, deferSingleClick, isOnControl, OPEN_CHART_HINT } from '../utils/clickIntent';
 
 // Price alerts as stored by SignalContext: triggered alerts stay in the list with isActive: false.
 type WatchlistAlert = PriceAlert & { triggeredAt?: number; triggeredPrice?: number };
@@ -14,6 +15,8 @@ interface WatchlistProps {
     onAdd?: (symbol: string) => void;
     onSetAlert?: (symbol: string) => void;
     onRemoveAlert?: (id: string) => void;
+    /** Double click on a coin: show it in the home page chart. */
+    onOpenChart?: (symbol: string) => void;
 }
 
 type Tab = 'favorites' | 'all' | 'movers' | 'alerts';
@@ -41,9 +44,10 @@ interface WatchlistRowProps {
     onAdd: (symbol: string) => void;
     onRemove: (symbol: string) => void;
     onSetAlert: (symbol: string) => void;
+    onOpenChart?: (symbol: string) => void;
 }
 
-const WatchlistRow = React.memo<WatchlistRowProps>(({ ticker, hasActiveAlert, isFavoritesTab, onAdd, onRemove, onSetAlert }) => {
+const WatchlistRow = React.memo<WatchlistRowProps>(({ ticker, hasActiveAlert, isFavoritesTab, onAdd, onRemove, onSetAlert, onOpenChart }) => {
     const isPositive = ticker.priceChangePercent >= 0;
     const symbolBase = ticker.symbol.replace('USDT', '');
     const iconUrl = `https://assets.coincap.io/assets/icons/${symbolBase.toLowerCase()}@2x.png`;
@@ -54,7 +58,11 @@ const WatchlistRow = React.memo<WatchlistRowProps>(({ ticker, hasActiveAlert, is
         // tabIndex lets keyboard / touch users reveal the actions via focus.
         <div
             tabIndex={0}
-            className={`group ${TABLE_COLS} h-7 cursor-pointer border-b border-border text-xs outline-none hover:bg-surface-secondary focus-within:bg-surface-secondary focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-primary`}
+            onDoubleClick={onOpenChart ? (e) => {
+                if (!isOnControl(e)) onOpenChart(ticker.symbol);
+            } : undefined}
+            title={onOpenChart ? OPEN_CHART_HINT : undefined}
+            className={`group ${TABLE_COLS} h-7 cursor-pointer ${onOpenChart ? 'select-none ' : ''}border-b border-border text-xs outline-none hover:bg-surface-secondary focus-within:bg-surface-secondary focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-primary`}
         >
             {/* Pair */}
             <div className="col-start-1 flex min-w-0 items-center gap-1.5">
@@ -186,7 +194,7 @@ const PriceAlertList: React.FC<{ alerts: WatchlistAlert[]; onRemove?: (id: strin
     );
 };
 
-export const Watchlist: React.FC<WatchlistProps> = ({ symbols, data, activeAlerts = [], onRemove, onAdd, onSetAlert, onRemoveAlert }) => {
+export const Watchlist: React.FC<WatchlistProps> = ({ symbols, data, activeAlerts = [], onRemove, onAdd, onSetAlert, onRemoveAlert, onOpenChart }) => {
     const [activeTab, setActiveTab] = useState<Tab>('favorites');
     const [viewMode, setViewMode] = useState<ViewMode>('list');
     const [search, setSearch] = useState('');
@@ -194,11 +202,13 @@ export const Watchlist: React.FC<WatchlistProps> = ({ symbols, data, activeAlert
     const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
     // Stable callbacks so memoized rows do not re-render just because the parent passed new functions
-    const handlersRef = useRef({ onAdd, onRemove, onSetAlert });
-    handlersRef.current = { onAdd, onRemove, onSetAlert };
+    const handlersRef = useRef({ onAdd, onRemove, onSetAlert, onOpenChart });
+    handlersRef.current = { onAdd, onRemove, onSetAlert, onOpenChart };
     const handleAdd = useCallback((symbol: string) => handlersRef.current.onAdd?.(symbol), []);
     const handleRemove = useCallback((symbol: string) => handlersRef.current.onRemove?.(symbol), []);
     const handleSetAlert = useCallback((symbol: string) => handlersRef.current.onSetAlert?.(symbol), []);
+    const handleOpenChart = useCallback((symbol: string) => handlersRef.current.onOpenChart?.(symbol), []);
+    const canOpenChart = !!onOpenChart;
 
     // Start from the first page whenever the list definition changes
     useEffect(() => {
@@ -368,6 +378,7 @@ export const Watchlist: React.FC<WatchlistProps> = ({ symbols, data, activeAlert
                                     onAdd={handleAdd}
                                     onRemove={handleRemove}
                                     onSetAlert={handleSetAlert}
+                                    onOpenChart={canOpenChart ? handleOpenChart : undefined}
                                 />
                             ))}
                             {showMoreButton}
@@ -387,9 +398,17 @@ export const Watchlist: React.FC<WatchlistProps> = ({ symbols, data, activeAlert
                                 return (
                                     <div
                                         key={ticker.symbol}
-                                        className="flex h-12 min-w-0 cursor-pointer flex-col items-center justify-center border-b border-r border-border px-1 text-center hover:outline hover:outline-1 hover:-outline-offset-1 hover:outline-primary"
+                                        className={`flex h-12 min-w-0 cursor-pointer flex-col items-center justify-center border-b border-r border-border px-1 text-center hover:outline hover:outline-1 hover:-outline-offset-1 hover:outline-primary${canOpenChart ? ' select-none' : ''}`}
                                         style={{ backgroundColor: bgColor }}
-                                        onClick={() => window.open(`https://www.tradingview.com/chart/?symbol=BINANCE:${ticker.symbol}`, '_blank')}
+                                        title={canOpenChart ? OPEN_CHART_HINT : undefined}
+                                        onClick={(e) => {
+                                            const open = () => window.open(`https://www.tradingview.com/chart/?symbol=BINANCE:${ticker.symbol}`, '_blank');
+                                            if (canOpenChart) deferSingleClick(e, open); else open();
+                                        }}
+                                        onDoubleClick={canOpenChart ? () => {
+                                            cancelSingleClick();
+                                            handleOpenChart(ticker.symbol);
+                                        } : undefined}
                                     >
                                         <div className="max-w-full truncate text-xs font-medium text-text">
                                             {ticker.symbol.replace('USDT', '')}

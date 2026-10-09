@@ -71,6 +71,38 @@ export interface Signal {
   // { value: 5.4, text: '5.4x', caption: 'son 1 saat hacmi / 24s ortalama saat' },
   // { value: -0.0712, text: '−0.0712%', caption: '8s eşdeğeri fonlama' }.
   magnitude?: { value: number; text: string; caption: string };
+  // What happened after the signal (forward tracking, signal_outcomes). Missing for market-wide
+  // records, browser-local entries and servers without the outcome table.
+  outcome?: SignalOutcome;
+}
+
+// One measured horizon after a signal. Every value is a fraction (0.0123 = +1.23 %).
+// raw = close / signal price − 1; ret = raw in the signal's direction; net = ret − round-trip cost;
+// excess = direction × (raw − BTC over the same window); mfe / mae = best / worst excursion on the path
+// (direction-signed; for a NEUTRAL record the highest high and the lowest low against the signal price).
+// ret / net / excess are null for NEUTRAL records. `error` = the horizon could not be measured.
+export interface SignalOutcomeHorizon {
+  raw: number | null;
+  ret: number | null;
+  net: number | null;
+  excess: number | null;
+  mfe: number | null;
+  mae: number | null;
+  closeAt: number | null;
+  resolvedAt: number | null;
+  error?: string;
+}
+
+export type SignalOutcomeStatus = 'pending' | 'partial' | 'done' | 'skipped';
+
+// Horizons: 15 minutes, 1 hour, 4 hours, 24 hours. null = not resolved (yet).
+export interface SignalOutcome {
+  status: SignalOutcomeStatus;
+  h15: SignalOutcomeHorizon | null;
+  h60: SignalOutcomeHorizon | null;
+  h240: SignalOutcomeHorizon | null;
+  h1440: SignalOutcomeHorizon | null;
+  note?: string; // server note, e.g. why the record is skipped or a horizon has a gap
 }
 
 export interface Liquidation {

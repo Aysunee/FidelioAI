@@ -4,7 +4,7 @@ import {
     ChevronRight, ChevronUp, ChevronDown, ChevronsUpDown
 } from 'lucide-react';
 import { useMarketData } from '../context/MarketContext';
-import { Ticker } from '../types';
+import { FuturesTicker, Ticker } from '../types';
 import { formatPrice } from '../utils/formatters';
 import {
     addPriceData,
@@ -15,21 +15,22 @@ import {
     CorrelationMatrix as CorrelationMatrixType
 } from '../utils/correlationEngine';
 import CorrelationMatrix from './CorrelationMatrix';
+import { useCryptoPerpSymbols } from './AnomalyRadar';
 import ErrorBoundary from './ErrorBoundary';
 import { CoinIcon } from './terminal/CoinIcon';
 
 // --- DATA CONSTANTS ---
 const CATEGORIES = [
     { name: "Smart Contract Platforms", coins: ["ETH", "SOL", "BNB", "ADA", "DOT"], desc: "Akıllı sözleşmeler ve dApp altyapısı." },
-    { name: "DeFi", coins: ["UNI", "LINK", "AAVE", "MKR"], desc: "Aracısız finansal işlemler ve protokoller." },
+    { name: "DeFi", coins: ["UNI", "LINK", "AAVE", "SKY"], desc: "Aracısız finansal işlemler ve protokoller." },
     { name: "Memes", coins: ["DOGE", "SHIB", "PEPE", "FLOKI", "BONK", "WIF"], desc: "Topluluk odaklı, şaka amaçlı varlıklar." },
-    { name: "AI & Big Data", coins: ["FET", "NEAR", "RNDR", "GRT"], desc: "Yapay zeka ve veri işleme." },
-    { name: "Layer 2 (L2)", coins: ["ARB", "OP", "MATIC", "MNT"], desc: "Ölçeklendirme çözümleri." },
-    { name: "RWA", coins: ["ONDO", "LINK", "OM"], desc: "Gerçek dünya varlıkları." },
+    { name: "AI & Big Data", coins: ["FET", "NEAR", "RENDER", "GRT"], desc: "Yapay zeka ve veri işleme." },
+    { name: "Layer 2 (L2)", coins: ["ARB", "OP", "POL", "MNT"], desc: "Ölçeklendirme çözümleri." },
+    { name: "RWA", coins: ["ONDO", "LINK", "MANTRA"], desc: "Gerçek dünya varlıkları." },
     { name: "Gaming / Metaverse", coins: ["AXS", "SAND", "MANA", "GALA", "IMX"], desc: "Oyun ve sanal evrenler." },
     { name: "Liquid Staking", coins: ["LDO", "RPL", "ENA"], desc: "Likidite sağlayan staking." },
     { name: "Solana Ecosystem", coins: ["SOL", "JUP", "RAY", "PYTH"], desc: "Solana ağı projeleri." },
-    { name: "DePIN", coins: ["RNDR", "HNT", "FIL", "AR"], desc: "Fiziksel altyapı ağları." },
+    { name: "DePIN", coins: ["RENDER", "HNT", "FIL", "AR"], desc: "Fiziksel altyapı ağları." },
     { name: "Oracles", coins: ["LINK", "PYTH", "BAND"], desc: "Veri akışı sağlayıcıları." },
     { name: "Privacy", coins: ["XMR", "ZEC", "ROSE", "SCRT"], desc: "Gizlilik odaklı." },
     { name: "Storage", coins: ["FIL", "AR", "STORJ", "SC"], desc: "Veri depolama." },
@@ -38,7 +39,7 @@ const CATEGORIES = [
     { name: "Bitcoin Ecosystem", coins: ["STX", "ORDI", "SATS"], desc: "BTC katmanları." },
     { name: "Fan Tokens", coins: ["SANTOS", "BAR", "CITY", "PORTO", "LAZIO", "PSG", "OG", "ASR", "ATM", "ACM"], desc: "Spor ve taraftar tokenları." },
     { name: "Çin Kökenli / Odaklı", coins: ["TRX", "VET", "NEO", "QTUM", "FIL", "CAKE", "CFX", "SUN", "CKB", "SUSHI", "ACH", "JST", "ONT", "NKN", "GHST", "HOOK", "WAN", "DYDX", "PHB"], desc: "Asya pazarı odaklı projeler." },
-    { name: "2017 Boğa Efsaneleri", coins: ["XRP", "TRX", "ADA", "BCH", "ZEC", "XMR", "XLM", "LTC", "ETC", "FIL", "XTZ", "IOTA", "NEO", "EOS"], desc: "Eski döngülerin popüler coinleri." }
+    { name: "2017 Boğa Efsaneleri", coins: ["XRP", "TRX", "ADA", "BCH", "ZEC", "XMR", "XLM", "LTC", "ETC", "FIL", "XTZ", "IOTA", "NEO", "A"], desc: "Eski döngülerin popüler coinleri." }
 ];
 
 const CORRELATIONS = [
@@ -72,12 +73,106 @@ const getSymbolPair = (symbol: string): string => {
     return specialRules[s] || `${s}USDT`;
 };
 
-// 24h change of a symbol, or null when there is no live data for it
-const getLiveChange = (marketData: Record<string, Ticker>, symbol: string): number | null => {
-    const ticker = marketData[getSymbolPair(symbol)];
-    if (!ticker) return null;
-    const value = Number(ticker.priceChangePercent);
-    return Number.isFinite(value) ? value : null;
+// Coins renamed on Binance: list entry -> former ticker (shown next to the name and matched by search).
+const FORMER_TICKERS: Record<string, string> = { RENDER: 'RNDR', POL: 'MATIC', SKY: 'MKR', MANTRA: 'OM', A: 'EOS' };
+
+const matchesCoin = (coin: string, lowSearch: string): boolean =>
+    coin.toLowerCase().includes(lowSearch) || (FORMER_TICKERS[coin]?.toLowerCase().includes(lowSearch) ?? false);
+
+// Coins without any Binance market (other exchanges' tokens, delisted projects): price and 24h change
+// come from CoinGecko instead.
+const COINGECKO_IDS: Record<string, string> = {
+    MNT: 'mantle', OKB: 'okb', CRO: 'crypto-com-chain', KCS: 'kucoin-shares', HNT: 'helium', SCRT: 'secret',
+    STORJ: 'storj', NKN: 'nkn', GHST: 'aavegotchi', HOOK: 'hooked-protocol', WAN: 'wanchain',
+    PHB: 'phoenix-global', ANC: 'anchor-protocol', MIR: 'mirror-protocol'
+};
+const COINGECKO_PRICE_URL = 'https://api.coingecko.com/api/v3/simple/price';
+const COINGECKO_REFRESH_MS = 2 * 60 * 1000;
+
+type QuoteSource = 'spot' | 'perp' | 'coingecko';
+interface Quote {
+    price: number | null;
+    change: number | null; // 24h change, percent
+    source: QuoteSource;
+}
+type QuoteLookup = (symbol: string) => Quote | null;
+type CoinGeckoQuotes = Record<string, { price: number | null; change: number | null }>;
+
+const SOURCE_NOTE: Record<Exclude<QuoteSource, 'spot'>, { tag: string; title: string }> = {
+    perp: { tag: 'PERP', title: 'Spotta işlem görmüyor: fiyat ve değişim Binance vadeli (perp) kontratından' },
+    coingecko: { tag: 'CG', title: "Binance'te işlem görmüyor: fiyat ve değişim CoinGecko'dan (2 dakikada bir)" }
+};
+
+const finiteOrNull = (value: unknown): number | null => {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+};
+
+// Binance spot first; a coin that is not on spot falls back to its USDT-M perpetual (only contracts that
+// are trading: settled ones keep a frozen mark price in the futures data), then to CoinGecko.
+const buildQuoteLookup = (
+    marketData: Record<string, Ticker>,
+    futuresData: Record<string, FuturesTicker>,
+    tradingPerps: Set<string> | null,
+    coinGecko: CoinGeckoQuotes
+): QuoteLookup => (symbol: string) => {
+    const pair = getSymbolPair(symbol);
+    const spot = marketData[pair];
+    if (spot) return { price: finiteOrNull(spot.lastPrice), change: finiteOrNull(spot.priceChangePercent), source: 'spot' };
+    const perp = tradingPerps?.has(pair) ? futuresData[pair] : undefined;
+    if (perp) return { price: finiteOrNull(perp.markPrice), change: finiteOrNull(perp.priceChangePercent), source: 'perp' };
+    const cg = coinGecko[symbol.toUpperCase()];
+    if (cg) return { price: cg.price, change: cg.change, source: 'coingecko' };
+    return null;
+};
+
+// Shared across mounts so switching tabs/pages does not refetch inside the refresh interval.
+let coinGeckoCache: { quotes: CoinGeckoQuotes; fetchedAt: number } | null = null;
+
+const useCoinGeckoQuotes = (): CoinGeckoQuotes => {
+    const [quotes, setQuotes] = useState<CoinGeckoQuotes>(() => coinGeckoCache?.quotes ?? {});
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        let cancelled = false;
+        const ids = [...new Set(Object.values(COINGECKO_IDS))].join(',');
+
+        const load = async () => {
+            if (coinGeckoCache && Date.now() - coinGeckoCache.fetchedAt < COINGECKO_REFRESH_MS - 1000) {
+                setQuotes(coinGeckoCache.quotes);
+                return;
+            }
+            if (document.visibilityState === 'hidden') return;
+            try {
+                const url = `${COINGECKO_PRICE_URL}?ids=${ids}&vs_currencies=usd&include_24hr_change=true`;
+                const response = await fetch(url, { headers: { Accept: 'application/json' } });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const body = await response.json();
+                const next: CoinGeckoQuotes = {};
+                for (const [symbol, id] of Object.entries(COINGECKO_IDS)) {
+                    const row = body?.[id];
+                    if (!row) continue;
+                    const price = finiteOrNull(row.usd);
+                    next[symbol] = { price: price !== null && price > 0 ? price : null, change: finiteOrNull(row.usd_24h_change) };
+                }
+                coinGeckoCache = { quotes: next, fetchedAt: Date.now() };
+                if (!cancelled) setQuotes(next);
+            } catch (err) {
+                // Keep the last known values; the next interval retries.
+                console.warn("[Nexus] CoinGecko fiyatları alınamadı:", err);
+            }
+        };
+
+        load();
+        const timer = window.setInterval(load, COINGECKO_REFRESH_MS);
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, []);
+
+    return quotes;
 };
 
 // Heuristic "direction agreement" of two 24h moves (-1..1). NOT a statistical correlation:
@@ -158,7 +253,10 @@ const ArchitectTableRow: React.FC<{
     isDriver?: boolean;
     isLagging?: boolean;
     cluster?: string;
-}> = ({ symbol, price, change, role, isDriver = false, isLagging = false, cluster }) => {
+    source?: QuoteSource;
+}> = ({ symbol, price, change, role, isDriver = false, isLagging = false, cluster, source }) => {
+    const formerTicker = FORMER_TICKERS[symbol];
+    const sourceNote = source && source !== 'spot' ? SOURCE_NOTE[source] : null;
     const changeValue = change === undefined || change === null || change === '' ? NaN : Number(change);
     const priceValue = price === undefined || price === null || price === '' ? NaN : Number(price);
     const isPositive = !Number.isFinite(changeValue) || changeValue >= 0;
@@ -176,6 +274,12 @@ const ArchitectTableRow: React.FC<{
                 <div className="flex min-w-0 items-center gap-1.5">
                     <CoinIcon asset={symbol} size={16} />
                     <span className={cn("truncate text-text", isDriver ? "font-semibold" : "font-medium")}>{symbol}</span>
+                    {formerTicker && (
+                        <span className="shrink-0 text-[10px] text-muted" title={`Binance'te ${formerTicker} adıyla listeleniyordu`}>eski {formerTicker}</span>
+                    )}
+                    {sourceNote && (
+                        <span className={cn(BADGE_CLASS, "bg-surface-secondary text-secondary")} title={sourceNote.title}>{sourceNote.tag}</span>
+                    )}
                     {isDriver && <Zap size={12} className="shrink-0 text-primary" />}
                     {isLagging && <Activity size={12} className="shrink-0 text-warning" />}
                 </div>
@@ -185,7 +289,10 @@ const ArchitectTableRow: React.FC<{
                     ? `$${priceValue < 1 ? formatPrice(priceValue) : priceValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
                     : <span className="text-muted">---</span>}
             </td>
-            <td className={cn(TD_CLASS, "truncate px-2 text-right font-mono", isPositive ? "text-success" : "text-danger")}>
+            <td
+                className={cn(TD_CLASS, "truncate px-2 text-right font-mono", isPositive ? "text-success" : "text-danger")}
+                title={sourceNote?.title}
+            >
                 {Number.isFinite(changeValue)
                     ? `${changeValue.toFixed(2)}%`
                     : <span className="font-sans text-[10px] uppercase tracking-wider text-muted">veri yok</span>}
@@ -209,13 +316,19 @@ const ArchitectTableRow: React.FC<{
 
 const MAJOR_SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 
-    'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'MATICUSDT', 'LINKUSDT',
+    'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'POLUSDT', 'LINKUSDT',
     'UNIUSDT', 'ATOMUSDT', 'LTCUSDT', 'BCHUSDT', 'ALGOUSDT',
     'VETUSDT', 'FILUSDT', 'TRXUSDT', 'ETCUSDT', 'XLMUSDT'
 ];
 
 export const NexusDashboard: React.FC = () => {
-    const { marketData } = useMarketData();
+    const { marketData, futuresData } = useMarketData();
+    const coinGeckoQuotes = useCoinGeckoQuotes();
+    const { symbols: tradingPerps } = useCryptoPerpSymbols();
+    const quote = useMemo(
+        () => buildQuoteLookup(marketData, futuresData, tradingPerps, coinGeckoQuotes),
+        [marketData, futuresData, tradingPerps, coinGeckoQuotes]
+    );
     const [activeTab, setActiveTab] = useState<'clusters' | 'correlations' | 'matrix'>('clusters');
     const [correlationMatrix, setCorrelationMatrix] = useState<CorrelationMatrixType | null>(null);
     const [searchTerm, setSearchTerm] = useState("");
@@ -277,11 +390,11 @@ export const NexusDashboard: React.FC = () => {
     const correlations = useMemo<CorrelationGroup[]>(() => {
         return CORRELATIONS.map(corr => {
             const driverPair = getSymbolPair(corr.driver);
-            const driverChange = getLiveChange(marketData, corr.driver);
+            const driverChange = quote(corr.driver)?.change ?? null;
 
             const followers: FollowerInfo[] = corr.followers.map(followerSymbol => {
                 const pair = getSymbolPair(followerSymbol);
-                const change = getLiveChange(marketData, followerSymbol);
+                const change = quote(followerSymbol)?.change ?? null;
 
                 if (change === null || driverChange === null) {
                     return { symbol: followerSymbol, change, isLagging: false, correlation: null, agreement: null, source: 'none' as const };
@@ -333,16 +446,16 @@ export const NexusDashboard: React.FC = () => {
                 correlationQuality: getQuality(avgCorrelation, correlationSource)
             };
         });
-    }, [marketData, correlationMatrix]);
+    }, [quote, correlationMatrix]);
 
     const processedData = useMemo(() => {
         const lowSearch = searchTerm.toLowerCase();
 
         if (activeTab === 'clusters') {
             const clusters = CATEGORIES.map(cat => {
-                const filteredCoins = cat.coins.filter(c => c.toLowerCase().includes(lowSearch) || cat.name.toLowerCase().includes(lowSearch));
+                const filteredCoins = cat.coins.filter(c => matchesCoin(c, lowSearch) || cat.name.toLowerCase().includes(lowSearch));
                 const validChanges = cat.coins
-                    .map(c => getLiveChange(marketData, c))
+                    .map(c => quote(c)?.change ?? null)
                     .filter((c): c is number => c !== null);
                 const avgChange = validChanges.length > 0
                     ? validChanges.reduce((acc, c) => acc + c, 0) / validChanges.length
@@ -355,12 +468,12 @@ export const NexusDashboard: React.FC = () => {
                         return 0; // No coin-level sorting for 'name' or 'velocity'
                     }
 
-                    const dataA = marketData[getSymbolPair(a)];
-                    const dataB = marketData[getSymbolPair(b)];
-                    if (!dataA || !dataB) return 0;
-
-                    const valA = sortConfig.field === 'price' ? Number(dataA.lastPrice) : Number(dataA.priceChangePercent);
-                    const valB = sortConfig.field === 'price' ? Number(dataB.lastPrice) : Number(dataB.priceChangePercent);
+                    const quoteA = quote(a);
+                    const quoteB = quote(b);
+                    const valA = sortConfig.field === 'price' ? quoteA?.price : quoteA?.change;
+                    const valB = sortConfig.field === 'price' ? quoteB?.price : quoteB?.change;
+                    // Coins without data always go last
+                    if (valA == null || valB == null) return valA == null ? (valB == null ? 0 : 1) : -1;
 
                     return sortConfig.direction === 'desc' ? valB - valA : valA - valB;
                 });
@@ -381,8 +494,8 @@ export const NexusDashboard: React.FC = () => {
         } else if (activeTab === 'correlations') {
             return correlations
                 .filter(corr =>
-                    corr.driver.toLowerCase().includes(lowSearch) ||
-                    corr.followers.some(f => f.symbol.toLowerCase().includes(lowSearch)) ||
+                    matchesCoin(corr.driver, lowSearch) ||
+                    corr.followers.some(f => matchesCoin(f.symbol, lowSearch)) ||
                     corr.note.toLowerCase().includes(lowSearch)
                 )
                 .sort((a, b) => {
@@ -403,7 +516,7 @@ export const NexusDashboard: React.FC = () => {
         } else {
             return []; // matrix tab handles its own data
         }
-    }, [searchTerm, activeTab, sortConfig, correlations, marketData]);
+    }, [searchTerm, activeTab, sortConfig, correlations, quote]);
 
     return (
         // Fills the view at every width (flex-1 inside the shell's column, h-full inside a grid cell);
@@ -474,7 +587,7 @@ export const NexusDashboard: React.FC = () => {
                     <ErrorBoundary>
                         <CorrelationTableContent
                             processedData={processedData as CorrelationGroup[]}
-                            marketData={marketData}
+                            quote={quote}
                             windowLabel={correlationWindowLabel}
                         />
                     </ErrorBoundary>
@@ -545,14 +658,14 @@ export const NexusDashboard: React.FC = () => {
                                         <td className={TD_CLASS} />
                                     </tr>
                                     {expanded && cat.filteredCoins.map((coin: string) => {
-                                        const pair = getSymbolPair(coin);
-                                        const data = pair ? marketData[pair] : null;
+                                        const data = quote(coin);
                                         return (
                                             <ArchitectTableRow
                                                 key={coin}
                                                 symbol={coin}
-                                                price={data?.lastPrice}
-                                                change={data?.priceChangePercent}
+                                                price={data?.price ?? undefined}
+                                                change={data?.change ?? undefined}
+                                                source={data?.source}
                                                 cluster={cat.name}
                                             />
                                         );
@@ -572,9 +685,9 @@ export const NexusDashboard: React.FC = () => {
 // Separate component for Correlations table to better isolate errors
 const CorrelationTableContent: React.FC<{
     processedData: CorrelationGroup[];
-    marketData: Record<string, Ticker>;
+    quote: QuoteLookup;
     windowLabel: string;
-}> = ({ processedData, marketData, windowLabel }) => {
+}> = ({ processedData, quote, windowLabel }) => {
     const formatSigned = (value: number) => (value > 0 ? `+${value.toFixed(2)}` : value.toFixed(2));
 
     const getBadgeTitle = (source: CorrelationSource) => {
@@ -636,12 +749,13 @@ const CorrelationTableContent: React.FC<{
                         </tr>
                         {/* Driver Row */}
                         {(() => {
-                            const data = marketData[getSymbolPair(corr.driver)];
+                            const data = quote(corr.driver);
                             return (
                                 <ArchitectTableRow
                                     symbol={corr.driver}
-                                    price={data?.lastPrice}
-                                    change={data?.priceChangePercent}
+                                    price={data?.price ?? undefined}
+                                    change={data?.change ?? undefined}
+                                    source={data?.source}
                                     isDriver={true}
                                     role="Catalyst Driver"
                                 />
@@ -649,7 +763,7 @@ const CorrelationTableContent: React.FC<{
                         })()}
                         {/* Follower Rows */}
                         {corr.followers.filter(f => f && f.symbol).map((f, idx) => {
-                            const data = marketData[getSymbolPair(f.symbol)];
+                            const data = quote(f.symbol);
                             let roleText: string;
                             if (f.correlation === null) {
                                 roleText = f.change === null ? "Takipçi · veri yok" : "Takipçi · sürücü verisi yok";
@@ -663,8 +777,9 @@ const CorrelationTableContent: React.FC<{
                                 <ArchitectTableRow
                                     key={f.symbol || idx}
                                     symbol={f.symbol}
-                                    price={data?.lastPrice}
-                                    change={data?.priceChangePercent}
+                                    price={data?.price ?? undefined}
+                                    change={data?.change ?? undefined}
+                                    source={data?.source}
                                     isLagging={f.isLagging}
                                     role={roleText}
                                 />

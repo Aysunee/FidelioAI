@@ -125,3 +125,28 @@ olarak paketler. Paket yoksa sunucu uyarı verir ve motor olmadan çalışmaya d
   kontratlar (`activeFunding`, `f8` kesir olarak), `telegram.server` ve bugün (00:00 UTC'den beri) üretilen motor sinyali
   sayısı (`signalsToday`). Hosting'in süreci ayakta tutup tutmadığı `boots` ve `uptimeSec` ile izlenir; her başlangıç
   ayrıca `[engine] Süreç başlangıcı kaydedildi` satırıyla loglanır.
+
+## Sinyal karnesi
+
+Geriye dönük test yerine ileriye dönük ölçüm: kaydedilen her sinyalin (motor, TradingView webhook, manuel; `MARKET`
+toplu kayıtları hariç) ardından fiyatın ne yaptığı ölçülür ve strateji başına dürüst bir karne çıkarılır
+(`server/outcomes.cjs`, tablo `signal_outcomes`, bkz. `server/schema.sql`).
+
+- **Kayıt:** Sinyal kaydedilir kaydedilmez `signal_outcomes` satırı açılır. `Funding_*` stratejileri ve `.P` ile biten
+  TradingView sembolleri vadeli (`perp`), diğerleri spot ölçülür; sembol o piyasada yoksa diğerine bakılır, hiçbirinde
+  yoksa (veya fiyat 0 / piyasa fiyatından 1,5 kattan fazla uzaksa) satır `skipped` olur.
+- **Ölçüm:** Yalnızca motor lideri, 60 sn'de bir, süresi dolan ufukları (15 dk, 1 s, 4 s, 24 s) Binance mumlarından
+  hesaplar (en fazla 20 satır/tur, dakikada en fazla 40 Binance isteği; hata olursa 2-4-8-16-32 dk arayla yeniden dener,
+  6. hatada o ufku hata olarak işaretler). Her ufuk: ham hareket, yön işaretli getiri, maliyet sonrası net getiri
+  (gidiş-dönüş spot %0,20, vadeli %0,10), aynı penceredeki BTC hareketine göre fark, en iyi / en kötü ara hareket
+  (MFE / MAE). Yönsüz (`NEUTRAL`) sinyallerde yalnızca hareket büyüklüğü vardır. Ölçülen ufuk lider sürece bağlı
+  tarayıcılara `signal_outcome` olayıyla gider; diğerleri sonraki `GET /api/signals` ile alır (her sinyalde `outcome`).
+- **Başlangıç:** Lider süreç açıldığında bir kez son 7 günün sonuç satırı olmayan sinyallerini ekler (en fazla 5000,
+  en yenilerden başlayarak; tekrar çalıştırmak çift kayıt üretmez); böylece karne gerçek veriyle başlar.
+- **Karne:** `GET /api/scorecard?days=7|30` (giriş yapmış her kullanıcı, süreç başına 60 sn önbellek) strateji
+  ailesi x ufuk başına örnek sayısı, bağımsız saat sayısı (`nEff`: aynı saatteki sinyaller bir sayılır), isabet oranı
+  (net > 0) ve %95 Wilson aralığı, ortalama / medyan net, BTC'ye göre fark ve karar verir: `nEff` 30'un altında
+  "Veri toplanıyor", 30-99 "Ön sonuç", 100 ve üstünde t ≥ 2 ve BTC'ye göre pozitifse "Maliyet sonrası pozitif",
+  t ≤ −2 ise "Ters yönde tutarlı", aksi halde "Kenar görünmüyor". Geçmiş sonuçlar gelecek için garanti değildir.
+- **Silme:** Tek sinyal silmek sonuç satırını da siler (hatalı / test sinyali karneden çıkar); "tümünü sil" yalnızca
+  akışı temizler, karne geçmişi korunur. Tablo oluşturulamazsa sinyaller ve API normal çalışır, karne boş kalır.

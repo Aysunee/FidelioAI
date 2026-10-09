@@ -13,6 +13,7 @@ const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env'), quiet: true });
 
 const db = require('./db.cjs');
+const outcomesLib = require('./outcomes.cjs');
 
 const app = express();
 const server = http.createServer(app);
@@ -380,8 +381,9 @@ const loadSignals = async (limit) => {
         `SELECT id, strategy, symbol, side, price, time, note, source, confidence FROM signals ORDER BY ${orderBy} LIMIT ?`,
         [limit]
     );
-    // Engine signals carry engine + magnitude in signal_meta (see the SIGNAL ENGINE section).
-    return attachSignalMeta(rows.map(toSignalDto));
+    // Engine signals carry engine + magnitude in signal_meta (see the SIGNAL ENGINE section); every signal
+    // with a measurement row carries its outcome (see SIGNAL OUTCOMES). Both are extra queries that never break the list.
+    return outcomes.attach(await attachSignalMeta(rows.map(toSignalDto)));
 };
 
 // Always tries the time_ms column first instead of trusting the cached "missing" answer: if the migration
@@ -486,6 +488,7 @@ const createAndBroadcastSignal = async (value) => {
     rememberRelayedSignal(signal.id, now);
     await insertSignal(signal, now);
     io.emit('new_signal', signal);
+    outcomes.registerQuietly({ ...signal, timeMs: now }); // forward tracking (fire and forget)
     return signal;
 };
 
@@ -668,6 +671,7 @@ app.delete('/api/signals/:id', authenticateToken, requireAdmin, async (req, res)
         return res.status(404).json({ error: 'Sinyal bulunamadı.' });
     }
     await deleteSignalMeta(req.params.id);
+    await outcomes.remove(req.params.id); // a removed (wrong / test) signal leaves the scorecard too
     noteSignalDeleted(req.params.id);
     io.emit('signal_deleted', { id: req.params.id });
     await recordDeleteTombstone(req.params.id); // browsers of the other processes (see SIGNAL RELAY)
@@ -1468,8 +1472,29 @@ const ENGINE_TABLES = {
         create: 'CREATE TABLE IF NOT EXISTS signal_meta (signal_id VARCHAR(50) PRIMARY KEY, engine VARCHAR(16), magnitude TEXT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
         probe: 'SELECT signal_id FROM signal_meta LIMIT 1',
         without: 'motor sinyallerinin motor/ölçüm bilgisi saklanmayacak'
+    },
+    signal_outcomes: {
+        create: outcomesLib.CREATE_TABLE_SQL,
+        probe: outcomesLib.PROBE_TABLE_SQL,
+        without: 'sinyal sonuçları ölçülmeyecek, sinyal karnesi boş kalacak'
     }
 };
+
+// ===== SIGNAL OUTCOMES (server/outcomes.cjs) =====
+// Every stored signal except the MARKET aggregates gets a signal_outcomes row right after it is stored (engine,
+// webhook and manual paths, in any process). Only the engine leader measures the due horizons (15m / 1h / 4h /
+// 24h) from Binance klines every 60 s (at most 40 Binance requests per minute) and emits 'signal_outcome' to its
+// own browsers; on its first pass it backfills the signals of the last 7 days that have no row yet.
+// GET /api/signals carries each signal's outcome, GET /api/scorecard the per-strategy summary.
+const outcomes = outcomesLib.createOutcomeTracker({
+    db,
+    fetch: (...args) => globalThis.fetch(...args),
+    now: () => Date.now(),
+    isLeader: () => engineHost.role === 'leader' && !engineHost.shuttingDown,
+    hasTimeMs: () => hasSignalsTimeMs(),
+    emit: (event, payload) => io.emit(event, payload),
+    log: engineLog
+});
 
 // Additive only: CREATE TABLE IF NOT EXISTS, never ALTER / DROP. Without the CREATE privilege a table
 // that already exists (created from server/schema.sql) is still used.
@@ -1679,6 +1704,7 @@ const publishEngineSignal = async (draft) => {
     const dto = { ...toSignalDto(signal), engine: draft.engine };
     if (magnitude) dto.magnitude = magnitude;
     io.emit('new_signal', dto);
+    outcomes.registerQuietly({ ...signal, engine: draft.engine, timeMs: at }); // forward tracking (MARKET: none)
     countEngineSignal(at);
     console.log(`[engine] Sinyal: ${dto.symbol} ${dto.side} ${dto.strategy}${magnitude ? ` (${magnitude.text})` : ''}`);
     if (engineTelegram) {
@@ -1861,6 +1887,7 @@ const scheduleLockCheck = (ms = ENGINE_LOCK_CHECK_MS) => {
 
 // Lost leadership: stop at once. Pending cooldowns are dropped, the new leader may already write its own.
 const stepDown = () => {
+    outcomes.stopResolver();
     if (engineHost.lockCheckTimer) clearTimeout(engineHost.lockCheckTimer);
     engineHost.lockCheckTimer = null;
     if (engineHost.cooldownTimer) clearTimeout(engineHost.cooldownTimer);
@@ -1949,6 +1976,7 @@ const becomeLeader = async () => {
     console.log('[engine] Motor kilidi alındı: sinyal motoru bu süreçte çalışıyor.');
     sendLeaderHeartbeat(); // standby processes see the new leader at once, not only after the first check
     scheduleLockCheck();
+    outcomes.startResolver(); // signal outcomes are measured by the leader only
 };
 
 const tryBecomeLeader = async () => {
@@ -2001,6 +2029,7 @@ const startEngineHost = async () => {
     }
     engineHost.stateTable = await ensureEngineTable('engine_state');
     engineHost.metaTable = await ensureEngineTable('signal_meta');
+    outcomes.setTable(await ensureEngineTable('signal_outcomes'));
     await recordBoot();
     await refreshSharedState();
     engineHost.sharedTimer = unrefTimer(setInterval(() => {
@@ -2022,6 +2051,7 @@ const shutdownEngineHost = async () => {
     if (engineHost.shuttingDown) return;
     engineHost.shuttingDown = true;
     stopSignalRelay();
+    outcomes.stopResolver();
     for (const key of ['lockTimer', 'lockCheckTimer']) {
         if (engineHost[key]) clearTimeout(engineHost[key]);
         engineHost[key] = null;
@@ -2252,6 +2282,26 @@ app.put('/api/engine/settings', authenticateToken, requireAdmin, async (req, res
     applyEngineSettings(settings, { local: true });
     console.log(`[engine] Motor ayarları güncellendi (kullanıcı: ${req.user.username}).`);
     res.json({ settings });
+});
+
+// Per-strategy scorecard of the measured signal outcomes (any signed-in user). ?days=7 (default) or 30; each
+// process caches it for 60 s. Shape and verdict rules: server/outcomes.cjs buildScorecard / computeStats.
+app.get('/api/scorecard', authenticateToken, async (req, res) => {
+    let days = outcomesLib.SCORECARD_DAYS[0];
+    if (req.query.days !== undefined) {
+        const raw = typeof req.query.days === 'string' ? req.query.days.trim() : '';
+        const parsed = /^\d+$/.test(raw) ? Number(raw) : NaN;
+        if (!outcomesLib.SCORECARD_DAYS.includes(parsed)) {
+            return res.status(400).json({ error: `days şu değerlerden biri olmalıdır: ${outcomesLib.SCORECARD_DAYS.join(', ')}.` });
+        }
+        days = parsed;
+    }
+    try {
+        res.json(await outcomes.scorecard(days));
+    } catch (err) {
+        console.error('[outcomes] Sinyal karnesi hesaplanamadı:', err && (err.code || err.message));
+        res.status(500).json({ error: 'Sinyal karnesi hesaplanamadı. Lütfen daha sonra tekrar deneyin.' });
+    }
 });
 
 // ===== SIGNAL RELAY (several Node processes behind the host's proxy) =====
@@ -2639,6 +2689,8 @@ module.exports = {
         },
         shutdown: shutdownEngineHost
     },
+    // Signal outcome tracker (server/outcomes.cjs), for tests and diagnostics only.
+    outcomes,
     // Cross-process signal relay internals, for tests and diagnostics only.
     signalRelay: {
         state: relay,
