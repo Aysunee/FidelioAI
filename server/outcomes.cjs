@@ -111,7 +111,8 @@ const buildRegistration = (signal) => {
         perp = true;
         symbol = symbol.slice(0, -2);
     }
-    symbol = symbol.replace(/[^A-Z0-9]/g, '').slice(0, 32);
+    // Letters of any script stay: Binance lists pairs such as '币安人生USDT'.
+    symbol = symbol.replace(/[^\p{L}\p{N}]/gu, '').slice(0, 32);
     const source = signal.source == null || signal.source === '' ? null : String(signal.source).slice(0, 50);
     const engine = ENGINE_KINDS.includes(signal.engine) ? signal.engine : (source && ENGINE_BY_SOURCE[source]) || null;
     const timeMs = Number(signal.timeMs);
@@ -844,6 +845,13 @@ const createOutcomeTracker = (deps) => {
         );
         const candidates = (Array.isArray(rows) ? rows : [])
             .filter(r => r && r.id !== null && r.id !== undefined && String(r.symbol || '').toUpperCase() !== MARKET_SYMBOL);
+        // Repair: an earlier version dropped non-Latin letters from symbols ('币安人生USDT' -> 'USDT') and marked
+        // those rows skipped. Removing them lets this backfill register them again with the right symbol.
+        try {
+            await db.query('DELETE FROM signal_outcomes WHERE status = ? AND symbol = ?', ['skipped', 'USDT']);
+        } catch (err) {
+            warn('repair', '[outcomes] Hatalı sembollü kayıtlar temizlenemedi:', err && (err.code || err.message));
+        }
         const existing = new Set();
         for (let i = 0; i < candidates.length; i += 200) {
             const ids = candidates.slice(i, i + 200).map(r => String(r.id));
