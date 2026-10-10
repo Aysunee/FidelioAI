@@ -148,5 +148,15 @@ toplu kayıtları hariç) ardından fiyatın ne yaptığı ölçülür ve strate
   (net > 0) ve %95 Wilson aralığı, ortalama / medyan net, BTC'ye göre fark ve karar verir: `nEff` 30'un altında
   "Veri toplanıyor", 30-99 "Ön sonuç", 100 ve üstünde t ≥ 2 ve BTC'ye göre pozitifse "Maliyet sonrası pozitif",
   t ≤ −2 ise "Ters yönde tutarlı", aksi halde "Kenar görünmüyor". Geçmiş sonuçlar gelecek için garanti değildir.
+- **Gölge kural (`Shadow_SqueezeFuel`, "Gölge · Short sıkışması yakıtı"):** Sinyal göndermez, yalnızca ölçülür
+  (`utils/shadowRules.ts`). Motor bir `Momentum_24h_Up` veya `Volume_Spike` BUY sinyali yayınladığında, sembolün USDT-M
+  vadeli kontratı varsa (`S`, yoksa `1000S` / `1000000S`) onu 12 saatliğine izlemeye alır ve kontratın açık pozisyonunu
+  (`GET /fapi/v1/openInterest`) başlangıç değeri olarak alır (10 dk içinde alınamazsa izleme düşer). 5 dk'da bir:
+  fonlama 8s eşdeğeri −%0,05 veya altındaysa ve spot fiyat sinyal fiyatının altında değilse güncel açık pozisyon okunur;
+  en az %15 büyümüşse bir kez kaydedilir ve sembol 72 saat yeniden izlenmez. Kayıt yalnızca `signal_outcomes`'a
+  (`engine` `SHADOW`, `source` `ALGO_SHADOW`, spot, %0,20 maliyet) yazılır: `signals` tablosuna, akışa, socket'e veya
+  Telegram'a gitmez; karnede en sonda, ayrı satırda görünür. ORCA rallisinden türetilmiş bir hipotezdir, kanıt yoktur.
+  İzleme durumu yalnızca motor sürecinin belleğindedir: yeniden başlatma veya lider değişimi izlenenleri ve 72 saatlik
+  beklemeleri sıfırlar.
 - **Silme:** Tek sinyal silmek sonuç satırını da siler (hatalı / test sinyali karneden çıkar); "tümünü sil" yalnızca
   akışı temizler, karne geçmişi korunur. Tablo oluşturulamazsa sinyaller ve API normal çalışır, karne boş kalır.

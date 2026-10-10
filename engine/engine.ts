@@ -13,6 +13,12 @@
 // slots that held-back candidates freed) are stamped here.
 // The guard state lives in memory only (a restart starts fresh; the evaluators' seeding prevents
 // re-announcing).
+//
+// Shadow rule Shadow_SqueezeFuel (utils/shadowRules.ts, only while the caller passes onShadowSignals): every
+// EMITTED Momentum_24h_Up / Volume_Spike BUY arms its spot symbol when it has a crypto perpetual; the baseline
+// open interest is fetched right after arming, a check every 5 min gates funding + price and fetches the
+// current open interest only when both hold. Fired events go to onShadowSignals only (never onSignals). The
+// shadow state is in memory only: a restart or a leader change loses the armed entries and the cooldowns.
 
 import type { FuturesTicker, Ticker } from '../types';
 import {
@@ -47,9 +53,24 @@ import {
     loadCryptoPerps,
     loadFundingIntervals,
     loadLatestSettled,
+    loadOpenInterest,
     settledExpiry,
     type SettledFunding,
 } from './binance';
+import {
+    SQUEEZE_FUEL_RULES,
+    armSqueezeFuel,
+    createSqueezeFuelState,
+    fireSqueezeFuel,
+    planSqueezeFuelCheck,
+    setSqueezeBaseline,
+    squeezeFundingF8,
+    squeezeFuelStatus,
+    type ShadowSignal,
+    type SqueezeArm,
+    type SqueezeFuelState,
+    type SqueezeMarket,
+} from '../utils/shadowRules';
 import { defaultSocketFactory, openStream, type StreamHandle } from './stream';
 import {
     STREAM_KEYS,
@@ -90,6 +111,7 @@ const STREAM_NAMES: Record<StreamKey, string> = {
 };
 
 const KIND_OF_SCAN: Record<ScanKind, EngineKind> = { momentum: 'MOMENTUM', volume: 'VOLUME', funding: 'FUNDING' };
+const DEFAULT_FUNDING_INTERVAL_HOURS = 8; // a contract missing from the LOADED interval map settles every 8 h
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -154,6 +176,14 @@ export function createEngine(options: CreateEngineOptions): Engine {
     let timers: ReturnType<typeof setInterval>[] = [];
     const passErrors: Record<ScanKind, number> = { momentum: 0, volume: 0, funding: 0 };
 
+    // Shadow rules (measured only; see the header)
+    const shadowOn = typeof options.onShadowSignals === 'function';
+    let shadowState: SqueezeFuelState = createSqueezeFuelState();
+    let shadowGen = 0;          // bumped by start / stop: answers of an earlier run are dropped
+    let shadowChecking = false;
+    let shadowFetchErrors = 0;
+    const baselineInFlight = new Set<string>();
+
     const streamState = (key: StreamKey): StreamState => streams[key]?.state() ?? 'down';
 
     const commitCooldowns = (next: EngineCooldowns, at: number) => {
@@ -166,12 +196,104 @@ export function createEngine(options: CreateEngineOptions): Engine {
         }
     };
 
+    // --- shadow rules --------------------------------------------------------------------------
+    const fetchOpenInterest = async (perp: string): Promise<number | null> => {
+        try {
+            return await loadOpenInterest(deps.fetch, perp);
+        } catch (err) {
+            shadowFetchErrors++;
+            if (shadowFetchErrors === 1 || shadowFetchErrors % 100 === 0) {
+                log.warn(`[engine] Gölge kural: açık pozisyon alınamadı (${perp}, ${shadowFetchErrors}. kez): ${errorText(err)}`);
+            }
+            return null;
+        }
+    };
+
+    const fetchBaseline = (entry: SqueezeArm) => {
+        const key = `${entry.spot}:${entry.armedAt}`;
+        if (baselineInFlight.has(key)) return;
+        baselineInFlight.add(key);
+        const gen = shadowGen;
+        void fetchOpenInterest(entry.perp)
+            .then((oi) => {
+                if (!running || gen !== shadowGen || oi === null) return;
+                shadowState = setSqueezeBaseline(shadowState, entry.spot, entry.armedAt, oi);
+            })
+            .finally(() => baselineInFlight.delete(key));
+    };
+
+    const armShadow = (signals: readonly EngineSignal[]) => {
+        if (!shadowOn) return;
+        try {
+            const result = armSqueezeFuel(shadowState, signals, perps, now());
+            shadowState = result.state;
+            for (const entry of result.armed) fetchBaseline(entry);
+        } catch (err) {
+            log.error(`[engine] Gölge kural kurulamadı: ${errorText(err)}`);
+        }
+    };
+
+    // Same freshness rules as the funding pass: mark-price stream connected and recent, intervals loaded.
+    const shadowMarket = (t: number): SqueezeMarket => {
+        const fundingFresh = streamState('futuresMark') === 'connected' && !!intervals && t - futuresMarkAt <= timing.futuresFreshMs;
+        const spotLive = streamState('spotMini') === 'connected';
+        return {
+            fundingF8: (perp) => {
+                if (!fundingFresh || !intervals) return null;
+                const row = futures.get(perp);
+                const seen = futuresSeenAt.get(perp);
+                if (!row || !(row.nextFundingTime > 0) || seen === undefined || t - seen > timing.futuresFreshMs) return null;
+                const interval = intervals.get(perp);
+                return squeezeFundingF8(row.fundingRate, typeof interval === 'number' && interval > 0 ? interval : DEFAULT_FUNDING_INTERVAL_HOURS);
+            },
+            spotPrice: (symbol) => {
+                if (!spotLive) return null;
+                const row = spot.get(symbol);
+                return row && Number.isFinite(row.lastPrice) && row.lastPrice > 0 ? row.lastPrice : null;
+            },
+        };
+    };
+
+    const emitShadow = (signals: ShadowSignal[]) => {
+        if (signals.length === 0 || !options.onShadowSignals) return;
+        const deliver = options.onShadowSignals;
+        Promise.resolve()
+            .then(() => deliver(signals))
+            .catch((err) => log.error(`[engine] Gölge kural kayıtları işlenemedi: ${errorText(err)}`));
+    };
+
+    const checkShadow = async () => {
+        if (!shadowOn || !running || shadowChecking || shadowState.armed.length === 0) return;
+        shadowChecking = true;
+        const gen = shadowGen;
+        try {
+            const t = now();
+            const plan = planSqueezeFuelCheck(shadowState, shadowMarket(t), t);
+            shadowState = plan.state;
+            for (const entry of plan.baseline) fetchBaseline(entry);
+            const fired: ShadowSignal[] = [];
+            for (const candidate of plan.candidates) {
+                const oi = await fetchOpenInterest(candidate.perp);
+                if (!running || gen !== shadowGen) return;
+                if (oi === null) continue;
+                const result = fireSqueezeFuel(shadowState, candidate, oi, now());
+                shadowState = result.state;
+                if (result.signal) fired.push(result.signal);
+            }
+            for (const signal of fired) log.info(`[engine] Gölge kural kaydı (ölçüm için): ${signal.symbol} ${signal.strategy}`);
+            emitShadow(fired);
+        } finally {
+            shadowChecking = false;
+        }
+    };
+
     const emit = (signals: EngineSignal[], scan: ScanKind) => {
         if (signals.length === 0) return;
         emitted[scan] += signals.length;
         Promise.resolve()
             .then(() => options.onSignals(signals, KIND_OF_SCAN[scan]))
             .catch((err) => log.error(`[engine] Sinyaller işlenemedi (${scan}): ${errorText(err)}`));
+        if (scan !== 'funding') armShadow(signals);
     };
 
     const momentumPass = () => {
@@ -341,6 +463,8 @@ export function createEngine(options: CreateEngineOptions): Engine {
         volumeState = createVolumeState();
         fundingState = createFundingEngineState();
         burstState = createBurstGuardState();
+        shadowState = createSqueezeFuelState();
+        shadowGen++;
         stats.momentum = EMPTY_ENGINE_STAT;
         stats.volume = EMPTY_ENGINE_STAT;
         stats.funding = EMPTY_ENGINE_STAT;
@@ -362,6 +486,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
                 setInterval(guarded('volume'), timing.volumeMs),
                 setInterval(guarded('funding'), timing.fundingMs),
             );
+            if (shadowOn) timers.push(setInterval(background(checkShadow), SQUEEZE_FUEL_RULES.checkEveryMs));
         }
         log.info(`[engine] Sinyal motoru başladı (momentum ${timing.momentumMs / 1000} sn, hacim ${timing.volumeMs / 1000} sn, fonlama ${timing.fundingMs / 1000} sn)`);
     };
@@ -379,6 +504,9 @@ export function createEngine(options: CreateEngineOptions): Engine {
         futures.clear();
         futuresSeenAt.clear();
         futuresMarkAt = 0;
+        shadowState = createSqueezeFuelState();
+        shadowGen++;
+        baselineInFlight.clear();
         stats.momentum = EMPTY_ENGINE_STAT;
         stats.volume = EMPTY_ENGINE_STAT;
         stats.funding = EMPTY_ENGINE_STAT;
@@ -422,6 +550,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
                 metaLoadedAt: metaLoadedAt || null,
                 settledLoadedAt: settledLoadedAt || null,
             },
+            ...(shadowOn ? { shadow: squeezeFuelStatus(shadowState, now()) } : {}),
         };
     };
 
@@ -432,5 +561,6 @@ export function createEngine(options: CreateEngineOptions): Engine {
         getStatus,
         getCooldowns: () => cooldowns,
         scanNow,
+        checkShadowNow: () => checkShadow().catch((err) => log.error(`[engine] Gölge kural kontrolü başarısız: ${errorText(err)}`)),
     };
 }

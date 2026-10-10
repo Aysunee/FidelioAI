@@ -97,15 +97,20 @@ const formatTime = (iso: string, timeZone: string): string => {
     }
 };
 
+/** Momentum / volume records are attention alerts (watch), not trade signals: no buy / sell colours. */
+const isWatchAlert = (signal: { engine?: string; source?: string }): boolean =>
+    signal.engine === 'MOMENTUM' || signal.engine === 'VOLUME' || signal.source === 'ALGO_MOMENTUM' || signal.source === 'ALGO_VOLUME';
+
 /** Plain text (no parse_mode): strategy / note may contain '_' or '*'. Mirrors the app's Telegram text. */
 export function buildEngineTelegramText(signal: NotifiableSignal, timeZone = 'Europe/Istanbul'): string {
-    const emoji = signal.side === 'NEUTRAL' ? '⚪' : signal.side === 'BUY' || signal.side === 'LONG' ? '🟢' : '🔴';
+    const up = signal.side === 'BUY' || signal.side === 'LONG';
+    const watch = isWatchAlert(signal);
+    const emoji = signal.side === 'NEUTRAL' ? '⚪' : watch ? (up ? '⬆️' : '⬇️') : up ? '🟢' : '🔴';
     // MARKET is not a pair: no price line.
     const market = signal.symbol === MARKET_SYMBOL;
-    const lines = [
-        `${emoji} ${market ? 'Piyasa geneli' : clean(signal.symbol, 30)} · ${directionText(signal.side)}`,
-        `Strateji: ${clean(strategyLabel(signal.strategy), 120)}`,
-    ];
+    const lines = [`${emoji} ${market ? 'Piyasa geneli' : clean(signal.symbol, 30)} · ${directionText(signal.side)}`];
+    if (watch) lines.push('İzleme uyarısı · alım/satım önerisi değil');
+    lines.push(`Strateji: ${clean(strategyLabel(signal.strategy), 120)}`);
     if (signal.magnitude) lines.push(`Ölçüm: ${clean(`${signal.magnitude.text} (${signal.magnitude.caption})`, 160)}`);
     if (!market) lines.push(`Fiyat: $${formatPrice(signal.price)}`);
     lines.push(`Zaman: ${formatTime(signal.time, timeZone)}`);

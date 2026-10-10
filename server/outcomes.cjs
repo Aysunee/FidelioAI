@@ -71,8 +71,11 @@ const CREATE_TABLE_SQL = 'CREATE TABLE IF NOT EXISTS signal_outcomes ('
     + ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
 const PROBE_TABLE_SQL = 'SELECT signal_id FROM signal_outcomes LIMIT 1';
 
-const ENGINE_BY_SOURCE = Object.freeze({ ALGO_MOMENTUM: 'MOMENTUM', ALGO_VOLUME: 'VOLUME', ALGO_DIVERGENCE: 'FUNDING' });
-const ENGINE_KINDS = ['MOMENTUM', 'VOLUME', 'FUNDING'];
+// SHADOW: measured-only shadow rules of the engine (utils/shadowRules.ts). Their rows are registered straight
+// from the engine's onShadowSignals (server/index.cjs); they never exist in the signals table, so the backfill
+// (which reads signals) never touches them.
+const ENGINE_BY_SOURCE = Object.freeze({ ALGO_MOMENTUM: 'MOMENTUM', ALGO_VOLUME: 'VOLUME', ALGO_DIVERGENCE: 'FUNDING', ALGO_SHADOW: 'SHADOW' });
+const ENGINE_KINDS = ['MOMENTUM', 'VOLUME', 'FUNDING', 'SHADOW'];
 
 // ---------------------------------------------------------------------------------------------------------
 // Pure helpers
@@ -373,7 +376,9 @@ const FIXED_FAMILIES = Object.freeze([
     { key: 'Volume_Spike:BUY', label: 'Hacim Sıçraması (yükseliş)', engine: 'VOLUME', side: 'BUY', family: 'Volume_Spike', neutral: false },
     { key: 'Volume_Spike:SELL', label: 'Hacim Sıçraması (düşüş)', engine: 'VOLUME', side: 'SELL', family: 'Volume_Spike', neutral: false },
     { key: 'Volume_Spike:NEUTRAL', label: 'Hacim Sıçraması (yönsüz)', engine: 'VOLUME', side: 'NEUTRAL', family: 'Volume_Spike', neutral: true },
-    { key: 'Funding_Regime_Neg', label: 'Negatif Fonlama Rejimi', engine: 'FUNDING', side: 'NEUTRAL', family: 'Funding_Regime_Neg', neutral: true }
+    { key: 'Funding_Regime_Neg', label: 'Negatif Fonlama Rejimi', engine: 'FUNDING', side: 'NEUTRAL', family: 'Funding_Regime_Neg', neutral: true },
+    // Shadow rule: never sent as a signal, only measured (spot, same cost as the base BUY rules it is compared with).
+    { key: 'Shadow_SqueezeFuel', label: 'Gölge · Short sıkışması yakıtı', engine: 'SHADOW', side: 'BUY', family: 'Shadow_SqueezeFuel', neutral: false, shadow: true }
 ].map(f => Object.freeze(f)));
 
 const sideKind = (side) => {
@@ -390,7 +395,7 @@ const familyOf = (row) => {
     const source = String(row.source || '');
     if (source.startsWith('ALGO_') || ENGINE_KINDS.includes(row.engine)) {
         const engine = ENGINE_KINDS.includes(row.engine) ? row.engine : ENGINE_BY_SOURCE[source] || null;
-        if (strategy === 'Momentum_24h_Up' || strategy === 'Momentum_24h_Down' || strategy === 'Funding_Regime_Neg') {
+        if (strategy === 'Momentum_24h_Up' || strategy === 'Momentum_24h_Down' || strategy === 'Funding_Regime_Neg' || strategy === 'Shadow_SqueezeFuel') {
             return { key: strategy, fixed: true };
         }
         if (strategy.startsWith('Volume_Spike')) return { key: `Volume_Spike:${sideKind(row.side)}`, fixed: true };
@@ -441,10 +446,14 @@ const buildScorecard = (rows, { days, now }) => {
             }
             byHorizon[h.label] = computeStats(samples, { neutral });
         }
-        out.push({ key: def.key, label: def.label, engine: def.engine, side, family: def.family, total: list.length, byHorizon, _fixed: FIXED_FAMILIES.includes(def) });
+        const row = { key: def.key, label: def.label, engine: def.engine, side, family: def.family, total: list.length, byHorizon, _fixed: FIXED_FAMILIES.includes(def) };
+        if (def.shadow === true) row.shadow = true;
+        out.push(row);
     }
     const fixedOrder = new Map(FIXED_FAMILIES.map((f, i) => [f.key, i]));
     out.sort((a, b) => {
+        // Shadow rules (measured only) close the list, after the TV / manual rows.
+        if (!!a.shadow !== !!b.shadow) return a.shadow ? 1 : -1;
         if (a._fixed || b._fixed) {
             if (a._fixed && b._fixed) return fixedOrder.get(a.key) - fixedOrder.get(b.key);
             return a._fixed ? -1 : 1;
@@ -847,6 +856,7 @@ const createOutcomeTracker = (deps) => {
             .filter(r => r && r.id !== null && r.id !== undefined && String(r.symbol || '').toUpperCase() !== MARKET_SYMBOL);
         // Repair: an earlier version dropped non-Latin letters from symbols ('币安人生USDT' -> 'USDT') and marked
         // those rows skipped. Removing them lets this backfill register them again with the right symbol.
+        // Shadow rows (engine SHADOW) are never affected: their symbol is a spot pair with a perpetual, never 'USDT'.
         try {
             await db.query('DELETE FROM signal_outcomes WHERE status = ? AND symbol = ?', ['skipped', 'USDT']);
         } catch (err) {

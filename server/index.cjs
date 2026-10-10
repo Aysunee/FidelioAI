@@ -1727,6 +1727,30 @@ const handleEngineSignals = async (signals) => {
     return published;
 };
 
+// Shadow rules (engine onShadowSignals, utils/shadowRules.ts): measured only. Each fired event gets an outcome
+// row and nothing else: no signals row, no signal_meta, no socket 'new_signal', no relay, no Telegram.
+const handleShadowSignals = (signals) => {
+    if (!Array.isArray(signals)) return;
+    for (const draft of signals) {
+        if (!isPlainObject(draft) || draft.engine !== 'SHADOW' || draft.source !== 'ALGO_SHADOW') continue;
+        const price = Number(draft.price);
+        const at = typeof draft.at === 'number' && Number.isFinite(draft.at) ? draft.at : Date.now();
+        if (!Number.isFinite(price) || price <= 0 || price >= MAX_PRICE) continue;
+        const shadow = {
+            id: `shadow_${crypto.randomUUID()}`, // 43 characters (signal_outcomes.signal_id is VARCHAR(50))
+            strategy: String(draft.strategy || '').slice(0, 100),
+            symbol: String(draft.symbol || '').slice(0, 20),
+            side: String(draft.side || 'BUY').slice(0, 10),
+            price: Number(price.toFixed(8)),
+            time: new Date(at).toISOString(),
+            timeMs: at,
+            source: 'ALGO_SHADOW',
+            engine: 'SHADOW'
+        };
+        outcomes.register(shadow).catch(err => engineWarn('shadow-register', '[outcomes] Gölge kural kaydının sonuç satırı oluşturulamadı:', err && (err.code || err.message)));
+    }
+};
+
 // GET /api/signals: engine / magnitude of engine signals come from signal_meta (second query, so a
 // missing table never breaks the signal list).
 const attachSignalMeta = async (signals) => {
@@ -1957,6 +1981,7 @@ const becomeLeader = async () => {
             settings: engineHost.settings,
             cooldowns,
             onSignals: handleEngineSignals,
+            onShadowSignals: handleShadowSignals,
             onStateChange: scheduleCooldownWrite,
             log: engineLog
         });
