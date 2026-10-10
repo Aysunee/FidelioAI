@@ -44,6 +44,14 @@ export interface EngineStatus {
     servedBy: EngineProcessRole | null;     // role of the answering process (null: older server)
     leaderHeartbeatAt: number | null;       // last heartbeat of the leader process (ms)
     leaderStale: boolean;                   // standby answered and the leader's heartbeat is older than 20 s (or missing)
+    // Shadow rules (measured only, never sent); in-memory on the leader. Missing on older servers.
+    shadow?: EngineShadowStatus;
+}
+
+export interface EngineShadowStatus {
+    armed: number;                          // BUY signals waiting for the squeeze-fuel condition
+    fired24h: number;
+    lastFiredAt: number | null;
 }
 
 export const ENGINE_STREAM_KEYS: readonly EngineStreamKey[] = ['spotMini', 'spotHour', 'futuresMark', 'futuresMini'];
@@ -64,6 +72,15 @@ const toStat = (value: unknown): EngineStat => {
     const matching = finiteOr(r.matching, 0);
     const universe = finiteOr(r.universe, 0);
     return { matching: Math.max(0, matching), universe: Math.max(0, universe) };
+};
+
+const toShadow = (value: unknown): EngineShadowStatus | undefined => {
+    if (!isRecord(value)) return undefined;
+    return {
+        armed: Math.max(0, finiteOr(value.armed, 0)),
+        fired24h: Math.max(0, finiteOr(value.fired24h, 0)),
+        lastFiredAt: finiteOr(value.lastFiredAt, null)
+    };
 };
 
 const toActiveFunding = (value: unknown): EngineActiveFunding[] => {
@@ -127,7 +144,8 @@ export const normalizeEngineStatus = (raw: unknown): EngineStatus => {
         signalsToday: Math.max(0, finiteOr(raw.signalsToday, 0)),
         servedBy: raw.servedBy === 'leader' || raw.servedBy === 'standby' || raw.servedBy === 'off' ? raw.servedBy : null,
         leaderHeartbeatAt: finiteOr(raw.leaderHeartbeatAt, null),
-        leaderStale: raw.leaderStale === true
+        leaderStale: raw.leaderStale === true,
+        ...(isRecord(raw.shadow) ? { shadow: toShadow(raw.shadow) } : {})
     };
 };
 

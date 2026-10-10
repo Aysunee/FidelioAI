@@ -205,6 +205,11 @@ const isEngineSignal = (signal: Pick<Signal, 'engine'>) =>
 const isAlgoRecord = (signal: Signal) =>
     isEngineSignal(signal) || (typeof signal.source === 'string' && signal.source.startsWith('ALGO_'));
 
+// Momentum / volume engine records (also stored rows with an ALGO_* source only) are watch alerts.
+const isWatchAlertRecord = (signal: Signal) =>
+    signal.engine === 'MOMENTUM' || signal.engine === 'VOLUME'
+    || (!signal.engine && (signal.source === 'ALGO_MOMENTUM' || signal.source === 'ALGO_VOLUME'));
+
 // "BTCUSDT BUY" for shared signals; "BTCUSDT · hareket yönü yukarı" / "BTCUSDT · yönsüz" for engine records;
 // "Piyasa geneli · hareket yönü aşağı" for a market-wide aggregate.
 const signalHeadline = (signal: Signal): string => {
@@ -458,13 +463,16 @@ const sanitizeTelegramText = (value: string, max: number) =>
 // and webhook-supplied text must not be able to inject formatting.
 const buildTelegramText = (signal: Signal) => {
     // Colour = direction (for engine records: of the measured move). A record without a direction is white.
-    const emoji = signal.side === 'NEUTRAL' ? '⚪' : signal.side === 'BUY' || signal.side === 'LONG' ? '🟢' : '🔴';
+    // Momentum / volume records are watch alerts (no edge over random entry): arrows, never green / red.
+    const up = signal.side === 'BUY' || signal.side === 'LONG';
+    const watch = isWatchAlertRecord(signal);
+    const emoji = signal.side === 'NEUTRAL' ? '⚪' : watch ? (up ? '⬆️' : '⬇️') : up ? '🟢' : '🔴';
     const time = new Date(signal.time);
     const timeText = Number.isNaN(time.getTime()) ? signal.time : time.toLocaleTimeString('tr-TR');
-    const lines = [
-        `${emoji} ${signalHeadline(signal)}`,
-        `Strateji: ${sanitizeTelegramText(getStrategyLabel(signal.strategy), 120)}`
-    ];
+    // Same order as the server text (engine/notify.ts): the watch line right under the headline.
+    const lines = [`${emoji} ${signalHeadline(signal)}`];
+    if (watch) lines.push('İzleme uyarısı · alım/satım önerisi değil');
+    lines.push(`Strateji: ${sanitizeTelegramText(getStrategyLabel(signal.strategy), 120)}`);
     if (signal.magnitude) {
         lines.push(`Ölçüm: ${sanitizeTelegramText(`${signal.magnitude.text} (${signal.magnitude.caption})`, 160)}`);
     }

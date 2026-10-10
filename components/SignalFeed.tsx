@@ -60,12 +60,27 @@ const SIDE_TONE: Record<SideKind, string> = {
     NEUTRAL: 'bg-surface-secondary text-secondary'
 };
 
+// Directional records of the momentum and volume rules are attention alerts: the replication showed
+// no edge over random entry, so they are presented as "İzle ↑ / ↓" and never as a trade side.
+export const isWatchAlertSignal = (sig: Signal): boolean => {
+    const engine = getSignalEngine(sig);
+    return (engine === 'MOMENTUM' || engine === 'VOLUME') && getSideKind(sig.side) !== 'NEUTRAL';
+};
+
+const WATCH_ALERT_TITLE =
+    "İzleme uyarısı: ölçülen hareketin yönü. Alım/satım önerisi değildir; Karne'de bu kuralın maliyet sonrası kâr ettirdiğine dair kanıt yok.";
+
 // Text and colour of the side badge. A local engine reports the direction of the move it measured
-// (never advice), so it is worded "Yukarı / Aşağı"; webhook and manual records keep the side they sent.
-export const getSideBadge = (sig: Signal): { kind: SideKind; text: string; tone: string; title?: string } => {
+// (never advice): momentum / volume as "İzle ↑ / ↓" (the arrow is in the text, `watch` tells callers
+// not to add an icon), other engine records "Yukarı / Aşağı"; webhook and manual records keep the side
+// they sent. The text starts with a capital İ, so CSS uppercase gives "İZLE" in every language.
+export const getSideBadge = (sig: Signal): { kind: SideKind; text: string; tone: string; title?: string; watch?: boolean } => {
     const kind = getSideKind(sig.side);
     if (kind === 'NEUTRAL') {
         return { kind, text: 'Yönsüz', tone: SIDE_TONE.NEUTRAL, title: 'Yönsüz kayıt: bu kural bir yön bildirmez.' };
+    }
+    if (isWatchAlertSignal(sig)) {
+        return { kind, text: kind === 'UP' ? 'İzle ↑' : 'İzle ↓', tone: SIDE_TONE[kind], title: WATCH_ALERT_TITLE, watch: true };
     }
     if (isLocalEngineSignal(sig)) {
         return {
@@ -278,7 +293,7 @@ const ROW =
     'grid cursor-pointer grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-x-3 px-3 py-1 text-xs [@container(min-width:900px)]:h-7 [@container(min-width:900px)]:grid-cols-[164px_minmax(0,1fr)_104px_96px_96px_176px_64px] [@container(min-width:900px)]:py-0';
 
 const CHANGE_HINT =
-    'Sinyal anındaki fiyata göre değişim. Yönlü kayıtlarda yön lehine (+) ya da aleyhine (−); yönsüz kayıtlarda ham fiyat değişimi.';
+    'Sinyal anındaki fiyata göre değişim. İzleme uyarılarında (momentum, hacim) ve yönsüz kayıtlarda fiyat değişimi; webhook ve manuel sinyallerde yön lehine (+) ya da aleyhine (−).';
 
 const OUTCOME_HINT =
     `Sinyalden 15 dakika, 1 saat, 4 saat ve 24 saat sonra ölçülen sonuç. Yönlü kayıtlarda maliyet sonrası net getiri (gidiş-dönüş spot ${formatCostPct(DEFAULT_OUTCOME_COSTS.spot)}, vadeli ${formatCostPct(DEFAULT_OUTCOME_COSTS.perp)}); yönsüz kayıtlarda ham fiyat değişimi. … bekleniyor, — ölçülemedi.`;
@@ -305,14 +320,14 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData, onO
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
 
-    // Price change since the signal. Directional records: in favour of the side (+) or against it (−).
-    // Neutral records have no side, so the raw change is returned.
+    // Price change since the signal. Webhook / manual (and old directional engine) records: in favour
+    // of the side (+) or against it (−). Watch alerts and neutral records: the plain price change.
     const getChange = (sig: Signal): number | null => {
         if (isMarketSignal(sig)) return null; // no price, no PnL
         const ticker = marketData[sig.symbol];
         if (!ticker || !(sig.price > 0) || !Number.isFinite(ticker.lastPrice)) return null;
         const rawChange = ((ticker.lastPrice - sig.price) / sig.price) * 100;
-        return getSideKind(sig.side) === 'DOWN' ? -rawChange : rawChange;
+        return getSideKind(sig.side) === 'DOWN' && !isWatchAlertSignal(sig) ? -rawChange : rawChange;
     };
 
     const filteredSignals = useMemo(() => {
@@ -404,16 +419,17 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData, onO
                             const isMarket = isMarketSignal(sig);
                             const badge = getSideBadge(sig);
                             const isNeutral = badge.kind === 'NEUTRAL';
+                            const isWatch = badge.watch === true;
                             const symbolBase = sig.symbol.replace(/\.P$/, '').replace('USDT', '');
                             const iconUrl = `https://assets.coincap.io/assets/icons/${symbolBase.toLowerCase()}@2x.png`;
                             const magnitude = getMagnitude(sig);
                             const confidence = getPayloadConfidence(sig);
                             const change = getChange(sig);
                             const ticker = isMarket ? undefined : marketData[sig.symbol];
-                            // Neutral records are never coloured as a gain or a loss
+                            // Neutral records are never coloured as a gain or a loss; watch alerts by the sign of the price move
                             const changeRounded = change === null ? 0 : roundPct(change);
                             const changeTone = change === null || isNeutral ? 'text-text' : changeRounded > 0 ? 'text-success' : changeRounded < 0 ? 'text-danger' : 'text-text';
-                            const changeLabel = isNeutral ? 'Ham fiyat değişimi' : 'Yöne göre değişim';
+                            const changeLabel = isNeutral ? 'Ham fiyat değişimi' : isWatch ? 'Sinyalden beri fiyat değişimi' : 'Yöne göre değişim';
                             const outcome = getSignalOutcome(sig);
 
                             const isFutures = isPerpSignal(sig);
@@ -466,7 +482,7 @@ export const SignalFeed: React.FC<SignalFeedProps> = ({ signals, marketData, onO
                                         {/* Change since the signal */}
                                         <div
                                             className="flex items-baseline justify-end gap-1 font-mono [@container(min-width:900px)]:order-5"
-                                            title={isNeutral ? 'Ham fiyat değişimi (yönsüz kayıt)' : 'Sinyalden beri, kaydın yönüne göre değişim'}
+                                            title={isNeutral ? 'Ham fiyat değişimi (yönsüz kayıt)' : isWatch ? 'Sinyalden beri fiyat değişimi' : 'Sinyalden beri, kaydın yönüne göre değişim'}
                                         >
                                             {change === null ? (
                                                 <span className="text-muted">—</span>
