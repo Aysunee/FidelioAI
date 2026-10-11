@@ -63,10 +63,11 @@ export interface Signal {
   // Only shared (webhook / manual) signals may carry a confidence. The local engines never write
   // one: they report the measured size in `magnitude` instead.
   confidence?: number;
-  // 'ALGO_DIVERGENCE' is the legacy source key of the funding engine.
-  source?: 'WEBHOOK' | 'ALGO_MOMENTUM' | 'ALGO_DIVERGENCE' | 'ALGO_VOLUME' | 'MANUAL';
+  // 'ALGO_DIVERGENCE' is the legacy source key of the funding engine. 'ALGO_SHADOW' / engine 'SHADOW'
+  // = a shadow rule (Shadow_SqueezeFuel): only measured by the outcome tracker, never in a feed.
+  source?: 'WEBHOOK' | 'ALGO_MOMENTUM' | 'ALGO_DIVERGENCE' | 'ALGO_VOLUME' | 'ALGO_SHADOW' | 'MANUAL';
   // Which engine produced the record. Local engines always set it together with `magnitude`.
-  engine?: 'MOMENTUM' | 'VOLUME' | 'FUNDING' | 'WEBHOOK' | 'MANUAL';
+  engine?: 'MOMENTUM' | 'VOLUME' | 'FUNDING' | 'SHADOW' | 'WEBHOOK' | 'MANUAL';
   // The measured size behind the record, e.g. { value: 9.1, text: '+9.1%', caption: '24s değişim, yeni 24s zirve' },
   // { value: 5.4, text: '5.4x', caption: 'son 1 saat hacmi / 24s ortalama saat' },
   // { value: -0.0712, text: '−0.0712%', caption: '8s eşdeğeri fonlama' }.

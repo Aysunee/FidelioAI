@@ -465,6 +465,12 @@ const ScoreCell: React.FC<{ stats: ScorecardStats; neutral: boolean; horizon: Ou
 const isNeutralRow = (row: ScorecardRow) =>
     row.side === 'NEUTRAL' || OUTCOME_HORIZONS.some(h => row.byHorizon[h.scorecard].verdict === 'NEUTRAL');
 
+// Shadow rule row: never sent or shown as a signal, only measured. Rendered last, set apart.
+const SHADOW_BADGE = {
+    text: 'GÖLGE',
+    title: "Sinyal göndermez, sadece ölçülür. Bir yükseliş sinyalinden (24s momentum veya hacim) sonraki 12 saat içinde funding −%0,05'in (8s eşdeğeri) altına iner, vadeli açık pozisyon en az %15 büyür ve fiyat sinyal fiyatının altına düşmezse kaydedilir. ORCA rallisinden türetilmiş bir hipotez; kanıt yok."
+} as const;
+
 // Two horizons per line below lg (each rule gets a title line), one table line per rule from lg on.
 const SCORE_GRID = 'grid grid-cols-2 gap-px lg:grid-cols-[minmax(150px,1fr)_repeat(4,minmax(0,1fr))]';
 
@@ -472,6 +478,11 @@ const ScorecardPanel: React.FC = () => {
     const [days, setDays] = useState<ScorecardDays>(7);
     const { data, loading, error, reload } = useScorecard(days);
     const costs = data?.costs;
+    // Shadow rows last, in server order otherwise.
+    const rows = useMemo(
+        () => (data ? [...data.rows.filter(row => !row.shadow), ...data.rows.filter(row => row.shadow)] : []),
+        [data]
+    );
 
     return (
         <div className="flex min-h-0 flex-1 flex-col">
@@ -542,12 +553,24 @@ const ScorecardPanel: React.FC = () => {
                                 </div>
                             ))}
                         </div>
-                        {data.rows.map(row => {
+                        {rows.map((row, index) => {
                             const neutral = isNeutralRow(row);
+                            // The first shadow row gets a thicker rule above it (gap-px shows bg-border).
+                            const firstShadow = row.shadow && (index === 0 || !rows[index - 1].shadow);
                             return (
-                                <div key={row.key} role="row" className={`${SCORE_GRID} group border-b border-border`}>
+                                <div key={row.key} role="row" className={`${SCORE_GRID} group border-b border-border ${firstShadow ? 'border-t-4' : ''}`}>
                                     <div role="rowheader" className="col-span-2 flex min-w-0 items-baseline justify-between gap-2 bg-surface px-3 py-1.5 group-hover:bg-surface-secondary lg:col-span-1 lg:flex-col lg:justify-start lg:gap-0.5">
-                                        <span className="min-w-0 text-xs font-medium leading-snug text-text">{row.label}</span>
+                                        <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+                                            {row.shadow && (
+                                                <span
+                                                    className="shrink-0 rounded-sm border border-border-strong px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 text-secondary"
+                                                    title={SHADOW_BADGE.title}
+                                                >
+                                                    {SHADOW_BADGE.text}
+                                                </span>
+                                            )}
+                                            <span className={`min-w-0 text-xs font-medium leading-snug ${row.shadow ? 'text-secondary' : 'text-text'}`}>{row.label}</span>
+                                        </span>
                                         <span className="shrink-0 text-[10px] text-muted">
                                             <span className="font-mono">{row.total}</span> kayıt{neutral ? ' · yönsüz' : ''}
                                         </span>
@@ -574,6 +597,12 @@ const ScorecardPanel: React.FC = () => {
                         Karar: nEff {SCORECARD_MIN_EARLY}'dan azsa veri toplanıyor; {SCORECARD_MIN_EARLY}–{SCORECARD_MIN_VERDICT - 1} arası ön sonuç;
                         en az {SCORECARD_MIN_VERDICT} olduğunda t ≥ 2 ve BTC'ye göre pozitifse kenar var, t ≤ −2 ise ters yön, diğer durumlarda kenar yok.
                     </p>
+                    {rows.some(row => row.shadow) && (
+                        <p>
+                            {/* word joiner: "−%0,05" never breaks after the minus */}
+                            <span className="text-secondary">{SHADOW_BADGE.text}</span>: {SHADOW_BADGE.title.replace('−%', '−\u2060%')}
+                        </p>
+                    )}
                     <p className="text-secondary">
                         Geçmiş sonuçlar gelecek için garanti değildir. Karar için en az 100 bağımsız saatlik örnek gerekir.
                     </p>
@@ -1060,8 +1089,9 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                                                         className={`inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 ${badge.tone}`}
                                                         title={badge.title}
                                                     >
-                                                        {badge.kind === 'UP' && <ArrowUpRight size={10} />}
-                                                        {badge.kind === 'DOWN' && <ArrowDownRight size={10} />}
+                                                        {/* a watch alert carries its arrow in the text */}
+                                                        {badge.kind === 'UP' && !badge.watch && <ArrowUpRight size={10} />}
+                                                        {badge.kind === 'DOWN' && !badge.watch && <ArrowDownRight size={10} />}
                                                         {badge.text}
                                                     </span>
                                                 </td>

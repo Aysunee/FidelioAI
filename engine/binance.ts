@@ -37,6 +37,7 @@ export const FAPI_BASE = 'https://fapi.binance.com';
 export const EXCHANGE_INFO_URL = `${FAPI_BASE}/fapi/v1/exchangeInfo`;
 export const FUNDING_INFO_URL = `${FAPI_BASE}/fapi/v1/fundingInfo`;
 export const FUNDING_RATE_URL = `${FAPI_BASE}/fapi/v1/fundingRate`;
+export const OPEN_INTEREST_URL = `${FAPI_BASE}/fapi/v1/openInterest`;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 /** Raw array (`/ws/...`) or combined-stream envelope (`/stream?streams=...` → { stream, data }). */
@@ -184,6 +185,14 @@ export async function loadFundingIntervals(fetchImpl: FetchLike): Promise<Map<st
     const body = await getJson(fetchImpl, FUNDING_INFO_URL);
     if (!Array.isArray(body)) throw new Error('beklenmeyen yanıt');
     return parseFundingIntervals(body);
+}
+
+/** Current open interest (contracts) of one USDT-M contract (GET /fapi/v1/openInterest, weight 1). Throws on a bad answer. */
+export async function loadOpenInterest(fetchImpl: FetchLike, symbol: string): Promise<number> {
+    const body = await getJson(fetchImpl, `${OPEN_INTEREST_URL}?symbol=${encodeURIComponent(symbol)}`);
+    const oi = Number((body as { openInterest?: unknown } | null)?.openInterest);
+    if (!Number.isFinite(oi) || oi <= 0) throw new Error('beklenmeyen yanıt');
+    return oi;
 }
 
 // --- Latest settled funding rate of every symbol --------------------------------------------

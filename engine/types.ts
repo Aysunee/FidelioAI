@@ -2,6 +2,7 @@
 // caller (server/index.cjs today, possibly a worker on another machine later) wires the callbacks.
 
 import type { EngineCooldowns, EngineKind, EngineSignal, EngineStats, FundingRegimeEntry, SignalSettings } from '../utils/signalEngines';
+import type { ShadowSignal, ShadowStatus } from '../utils/shadowRules';
 
 export interface EngineLogger {
     info(message: string): void;
@@ -69,6 +70,11 @@ export interface CreateEngineOptions {
     cooldowns?: unknown;  // sanitized with sanitizeEngineCooldowns
     /** Called with the signals of one pass. A returned promise is awaited for error logging only. */
     onSignals: (signals: EngineSignal[], kind: EngineKind) => void | Promise<void>;
+    /**
+     * Fired shadow-rule events (utils/shadowRules.ts), measured only: never pass through onSignals, the burst
+     * guard, Telegram or any feed. Without this callback the shadow rules stay off (no arming, no requests).
+     */
+    onShadowSignals?: (signals: ShadowSignal[]) => void | Promise<void>;
     /** Called whenever a cooldown stamp was added (the caller persists them, throttled). */
     onStateChange?: (cooldowns: EngineCooldowns) => void;
     log?: EngineLogger;
@@ -94,6 +100,8 @@ export interface EngineStatusSnapshot {
         metaLoadedAt: number | null;
         settledLoadedAt: number | null;
     };
+    /** Shadow rule Shadow_SqueezeFuel (in memory; absent while the shadow rules are off). */
+    shadow?: ShadowStatus;
 }
 
 export interface Engine {
@@ -105,4 +113,6 @@ export interface Engine {
     getCooldowns(): EngineCooldowns;
     /** Runs the given passes right away (all three when omitted). */
     scanNow(kinds?: readonly ScanKind[]): void;
+    /** Runs the shadow-rule check right away (tests; it also runs every SQUEEZE_FUEL_RULES.checkEveryMs). */
+    checkShadowNow(): Promise<void>;
 }

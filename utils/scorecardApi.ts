@@ -135,12 +135,17 @@ export interface ScorecardStats {
 export interface ScorecardRow {
     key: string;
     label: string;
-    engine: string | null;
+    engine: string | null;           // 'MOMENTUM' | 'VOLUME' | 'FUNDING' | 'SHADOW' | 'WEBHOOK' | 'MANUAL' ...
     side: string;
     family: string;
+    // Shadow rule (engine 'SHADOW'): measured only, never sent or shown as a signal.
+    shadow: boolean;
     total: number;
     byHorizon: Record<ScorecardHorizon, ScorecardStats>;
 }
+
+// The one shadow rule so far: short-squeeze fuel after a BUY of the momentum / volume rules.
+export const SHADOW_SQUEEZE_FAMILY = 'Shadow_SqueezeFuel';
 
 export interface Scorecard {
     generatedAt: number;
@@ -228,12 +233,14 @@ const normalizeRow = (raw: unknown, index: number): ScorecardRow | null => {
     const key = typeof raw.key === 'string' && raw.key !== '' ? raw.key : `${family || 'row'}_${side || index}`;
     const stats = {} as Record<ScorecardHorizon, ScorecardStats>;
     SCORECARD_HORIZONS.forEach(h => { stats[h] = normalizeStats(byHorizon[h], neutral); });
+    const engine = typeof raw.engine === 'string' && raw.engine !== '' ? raw.engine.toUpperCase() : null;
     return {
         key,
         label: typeof raw.label === 'string' && raw.label.trim() !== '' ? raw.label.slice(0, 120) : (family || key),
-        engine: typeof raw.engine === 'string' && raw.engine !== '' ? raw.engine.toUpperCase() : null,
+        engine,
         side: neutral ? 'NEUTRAL' : side,
         family,
+        shadow: raw.shadow === true || engine === 'SHADOW' || family === SHADOW_SQUEEZE_FAMILY,
         total: nonNegativeInt(raw.total),
         byHorizon: stats
     };
