@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "prestart": "npm run build:engine || echo build:engine calismadi, sunucu mevcut server/build/engine.cjs ile veya sinyal motoru olmadan baslar",
     "start": "node server/index.cjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test server/"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",

@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { Signal } from '../types';
-import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings, Percent, Activity, Server, Info, Globe, RefreshCw, ClipboardList } from 'lucide-react';
+import { Search, Trash2, Filter, AlertCircle, ArrowUpRight, ArrowDownRight, Zap, Download, Settings, Percent, Activity, Server, Info, Globe, RefreshCw, ClipboardList, ChevronDown } from 'lucide-react';
 import { useSignals } from '../context/SignalContext';
 import { useUser } from '../context/UserContext';
 import { Modal } from './ui/Modal';
@@ -11,7 +11,12 @@ import {
     OUTCOME_HORIZONS,
     SCORECARD_MIN_EARLY,
     SCORECARD_MIN_VERDICT,
+    SCORECARD_MIN_VERIFIED_DAYS,
+    SCORECARD_T_SCREEN,
+    SCORECARD_T_VERIFIED,
     VERDICT_BADGES,
+    formatClusterCount,
+    formatTStat,
     formatCostPct,
     formatHitRate,
     formatOutcomeAbsPct,
@@ -281,13 +286,16 @@ const EngineStatusBlock: React.FC<{ status: EngineStatus | null; error: string |
 
 // ---------------------------------------------------------------------------
 // Karne: per-rule scorecard of forward tracking (GET /api/scorecard). Descriptive, net of costs,
-// against BTC, with minimum sample sizes before any verdict.
+// against BTC and the equal-weight altcoin mean, cluster-robust (hours / UTC days), with robust means and a
+// three-tier verdict (Tarama / Aday / Doğrulanmış) after minimum sample sizes. The robust numbers sit in a
+// collapsed 'Ayrıntı' section by default.
 // ---------------------------------------------------------------------------
 
 const SCORECARD_REFRESH_MS = 5 * 60 * 1000;
 const SCORECARD_PERIODS: { days: ScorecardDays; label: string; title: string }[] = [
     { days: 7, label: '7g', title: 'Son 7 gün' },
-    { days: 30, label: '30g', title: 'Son 30 gün' }
+    { days: 30, label: '30g', title: 'Son 30 gün' },
+    { days: 90, label: '90g', title: "Son 90 gün ('Doğrulanmış' için gereken en kısa pencere)" }
 ];
 
 // Last response per period, kept while the app is open: switching tabs or periods shows it at once
@@ -378,10 +386,15 @@ const HitRangeBar: React.FC<{ stats: ScorecardStats; strong: boolean }> = ({ sta
 };
 
 
+const formatSpanDays = (spanDays: number | null): string =>
+    spanDays === null ? '—' : spanDays < 1 ? '<1 gün' : `${Math.floor(spanDays)} gün`;
+
+const costLabel = (cost: number) => `%${(cost * 100).toFixed(1).replace('.', ',')}`;
+
 const statsTitle = (stats: ScorecardStats, neutral: boolean, horizon: OutcomeHorizonInfo): string => {
     const lines = [
         `${horizon.long} sonra · ${stats.verdictText}`,
-        `n ${stats.n} kayıt · nEff ${stats.nEff} bağımsız saat`
+        `n ${stats.n} kayıt · nEff ${formatClusterCount(stats.nEff, stats.cluster)} (${stats.nHours} saat, ${stats.nDays} gün) · pencere ${formatSpanDays(stats.spanDays)}`
     ];
     if (neutral) {
         lines.push(
@@ -393,18 +406,65 @@ const statsTitle = (stats: ScorecardStats, neutral: boolean, horizon: OutcomeHor
         lines.push(
             `İsabet ${formatHitRate(stats.hitRate)}${ci}`,
             `Net: medyan ${formatOutcomePct(stats.medianNet)} · ortalama ${formatOutcomePct(stats.meanNet)}`,
-            `BTC'ye göre (ortalama) ${formatOutcomePct(stats.meanExcess)}`,
-            `Medyan ham ${formatOutcomePct(stats.medianRaw)} · en iyi ${formatOutcomePct(stats.medianMfe)} · en kötü ${formatOutcomePct(stats.medianMae)}`
+            `Sağlam: winsorize %5 ${formatOutcomePct(stats.meanNetWinsor)} · en büyük 3 hariç ${formatOutcomePct(stats.meanNetTrimTop)} · log ${formatOutcomePct(stats.meanLogNet)}${stats.outlierDependent ? ' · aykırı değere bağlı' : ''}`,
+            `BTC'ye göre ${formatOutcomePct(stats.meanExcess)} · EW-alt'a göre ${formatOutcomePct(stats.meanExcessAlt)}`,
+            `Maliyet duyarlılığı: ${stats.costSensitivity.map(c => `${costLabel(c.cost)} → ${formatOutcomePct(c.meanNet)}`).join(' · ')}`,
+            `Medyan ham ${formatOutcomePct(stats.medianRaw)} · en iyi ${formatOutcomePct(stats.medianMfe)} · en kötü ${formatOutcomePct(stats.medianMae)}`,
+            `t saat kümeli ${formatTStat(stats.tStatHour)} · gün kümeli ${formatTStat(stats.tStatDay)}`
         );
-        if (stats.tStat !== null) lines.push(`t ${stats.tStat.toFixed(2)}`);
     }
     return lines.join('\n');
 };
 
-// One horizon of one rule: verdict, sample size and the descriptive numbers.
-const ScoreCell: React.FC<{ stats: ScorecardStats; neutral: boolean; horizon: OutcomeHorizonInfo }> = ({ stats, neutral, horizon }) => {
-    // Below the minimum sample the numbers are shown, but never coloured as a gain or a loss.
-    const strong = stats.nEff >= SCORECARD_MIN_EARLY;
+// Collapsed by default: the robust means, both comparisons, the cost sensitivity and the clustered t statistics.
+const ScoreDetail: React.FC<{ stats: ScorecardStats; tone: (value: number | null) => string }> = ({ stats, tone }) => (
+    <div className="mt-1 border-t border-border pt-1">
+        <div className={SCORE_LINE}>
+            <span className={SCORE_LABEL} title="Ortalama net getiri (maliyet sonrası)">ortalama net</span>
+            <span className={`${SCORE_VALUE} ${tone(stats.meanNet)}`}>{formatOutcomePct(stats.meanNet)}</span>
+        </div>
+        <div className={SCORE_LINE}>
+            <span className={SCORE_LABEL} title="Her iki kuyruğun %5'i en yakın tutulan değere çekilmiş ortalama">winsorize %5</span>
+            <span className={`${SCORE_VALUE} ${tone(stats.meanNetWinsor)}`}>{formatOutcomePct(stats.meanNetWinsor)}</span>
+        </div>
+        <div className={SCORE_LINE}>
+            <span className={SCORE_LABEL} title="En büyük 3 kazanç çıkarılmış ortalama">en büyük 3 hariç</span>
+            <span className={`${SCORE_VALUE} ${tone(stats.meanNetTrimTop)}`}>{formatOutcomePct(stats.meanNetTrimTop)}</span>
+        </div>
+        <div className={SCORE_LINE}>
+            <span className={SCORE_LABEL} title="log(1 + net) ortalaması: +%100 ile −%50 birbirini götürür">log ortalama</span>
+            <span className={`${SCORE_VALUE} ${tone(stats.meanLogNet)}`}>{formatOutcomePct(stats.meanLogNet)}</span>
+        </div>
+        <div className={SCORE_LINE}>
+            <span className={SCORE_LABEL} title="Aynı saatte ve ufukta ölçülen tüm sinyallerin eşit ağırlıklı ortalama ham hareketine göre fark">EW-alt'a göre</span>
+            <span className={`${SCORE_VALUE} ${tone(stats.meanExcessAlt)}`}>{formatOutcomePct(stats.meanExcessAlt)}</span>
+        </div>
+        <div className={SCORE_LINE}>
+            <span className={SCORE_LABEL} title="Gidiş-dönüş maliyet %0,2 / %0,4 / %0,6 iken ortalama net">maliyet {stats.costSensitivity.map(c => costLabel(c.cost).slice(1)).join('/')}</span>
+            <span className={`${SCORE_VALUE} text-secondary`}>
+                {stats.costSensitivity.map((c, i) => (
+                    <React.Fragment key={c.cost}>
+                        {i > 0 && <span className="text-muted"> · </span>}
+                        <span className={tone(c.meanNet)}>{formatOutcomePct(c.meanNet, 1)}</span>
+                    </React.Fragment>
+                ))}
+            </span>
+        </div>
+        <div className={SCORE_LINE}>
+            <span className={SCORE_LABEL} title="t istatistiği: saat kümeli (Tarama eşiği) ve UTC gün kümeli (Aday / Doğrulanmış eşiği)">t saat / gün</span>
+            <span className={`${SCORE_VALUE} text-secondary`}>{formatTStat(stats.tStatHour)} / {formatTStat(stats.tStatDay)}</span>
+        </div>
+        <div className={SCORE_LINE}>
+            <span className={SCORE_LABEL} title="İlk ve son ölçülen sinyal arasındaki süre; 'Doğrulanmış' için en az 90 gün">pencere</span>
+            <span className={`${SCORE_VALUE} text-secondary`}>{formatSpanDays(stats.spanDays)}</span>
+        </div>
+    </div>
+);
+
+// One horizon of one rule: verdict, sample size and the descriptive numbers (+ the detail block when open).
+const ScoreCell: React.FC<{ stats: ScorecardStats; neutral: boolean; horizon: OutcomeHorizonInfo; detail: boolean }> = ({ stats, neutral, horizon, detail }) => {
+    // Below the minimum sample (30 signal hours) the numbers are shown, but never coloured as a gain or a loss.
+    const strong = stats.nHours >= SCORECARD_MIN_EARLY;
     const tone = (value: number | null) => (strong ? outcomeTone(value) : value === null ? 'text-muted' : 'text-secondary');
     const badge = VERDICT_BADGES[stats.verdict];
     return (
@@ -414,12 +474,12 @@ const ScoreCell: React.FC<{ stats: ScorecardStats; neutral: boolean; horizon: Ou
                 <span className={`truncate rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 ${badge.tone}`}>
                     {badge.text}
                 </span>
-                {/* n (nEff); while collecting, nEff against the minimum of 30 */}
+                {/* n (nEff with its cluster unit); while collecting, signal hours against the minimum of 30 */}
                 <span className="shrink-0 font-mono text-[10px] text-muted">
                     n {stats.n}
                     {stats.n > 0 && (
                         <span className="text-secondary">
-                            {' '}({stats.verdict === 'COLLECTING' ? `${stats.nEff}/${SCORECARD_MIN_EARLY}` : stats.nEff})
+                            {' '}({stats.verdict === 'COLLECTING' ? `${stats.nHours}/${SCORECARD_MIN_EARLY} saat` : formatClusterCount(stats.nEff, stats.cluster)})
                         </span>
                     )}
                 </span>
@@ -456,6 +516,7 @@ const ScoreCell: React.FC<{ stats: ScorecardStats; neutral: boolean; horizon: Ou
                         <span className={SCORE_LABEL}>BTC'ye göre</span>
                         <span className={`${SCORE_VALUE} ${tone(stats.meanExcess)}`}>{formatOutcomePct(stats.meanExcess)}</span>
                     </div>
+                    {detail && <ScoreDetail stats={stats} tone={tone} />}
                 </div>
             )}
         </div>
@@ -476,6 +537,7 @@ const SCORE_GRID = 'grid grid-cols-2 gap-px lg:grid-cols-[minmax(150px,1fr)_repe
 
 const ScorecardPanel: React.FC = () => {
     const [days, setDays] = useState<ScorecardDays>(7);
+    const [detail, setDetail] = useState(false);
     const { data, loading, error, reload } = useScorecard(days);
     const costs = data?.costs;
     // Shadow rows last, in server order otherwise.
@@ -509,6 +571,17 @@ const ScorecardPanel: React.FC = () => {
                     bekleyen ölçüm: <span className="font-mono text-text">{data ? data.pending : '—'}</span>
                 </p>
                 <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                        type="button"
+                        onClick={() => setDetail(d => !d)}
+                        aria-pressed={detail}
+                        aria-expanded={detail}
+                        title="Sağlam ortalamalar, EW-alt kıyası, maliyet duyarlılığı ve kümeli t istatistikleri"
+                        className={`inline-flex h-6 items-center gap-0.5 rounded-sm border border-border px-1.5 text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-primary ${detail ? 'bg-surface-highlight text-text' : 'text-secondary hover:text-text'}`}
+                    >
+                        Ayrıntı
+                        <ChevronDown size={12} className={`transition-transform ${detail ? 'rotate-180' : ''}`} />
+                    </button>
                     {data && (
                         <span className="font-mono text-[10px] text-muted" title="Karnenin hesaplandığı an (sunucu 60 sn önbellekler)">
                             {formatClockTime(data.generatedAt, false)}
@@ -576,7 +649,7 @@ const ScorecardPanel: React.FC = () => {
                                         </span>
                                     </div>
                                     {OUTCOME_HORIZONS.map(h => (
-                                        <ScoreCell key={h.key} stats={row.byHorizon[h.scorecard]} neutral={neutral} horizon={h} />
+                                        <ScoreCell key={h.key} stats={row.byHorizon[h.scorecard]} neutral={neutral} horizon={h} detail={detail} />
                                     ))}
                                 </div>
                             );
@@ -587,15 +660,26 @@ const ScorecardPanel: React.FC = () => {
                 {/* How to read it */}
                 <div className="space-y-1 px-3 py-2 text-[11px] leading-snug text-muted">
                     <p>
-                        <span className="text-secondary">n</span> ölçülen kayıt, parantez içi <span className="text-secondary">nEff</span> bağımsız saat sayısı
-                        (aynı saatte açılan kayıtlar tek örnek sayılır). <span className="text-secondary">İsabet</span> maliyet sonrası kaydın yönünde
-                        sonuçlananların oranıdır; çubuk %95 güven aralığı, dikey çizgi %50. <span className="text-secondary">Medyan net</span> maliyet
-                        düşülmüş getiri, <span className="text-secondary">BTC'ye göre</span> aynı aralıktaki BTC hareketine göre ortalama farktır.
-                        Yönsüz kurallarda yalnızca hareketin büyüklüğü gösterilir.
+                        <span className="text-secondary">n</span> ölçülen kayıt, parantez içi <span className="text-secondary">nEff</span> bağımsız küme sayısı:
+                        15 dk ve 1 s ufuklarında sinyal saati, 4 s ve 24 s ufuklarında UTC günü (aynı kümedeki kayıtlar tek örnek sayılır; t istatistiği de
+                        bu kümeyle hesaplanır). <span className="text-secondary">İsabet</span> maliyet sonrası kaydın yönünde sonuçlananların oranıdır;
+                        çubuk %95 güven aralığı, dikey çizgi %50. <span className="text-secondary">Medyan net</span> maliyet düşülmüş getiri,{' '}
+                        <span className="text-secondary">BTC'ye göre</span> aynı aralıktaki BTC hareketine göre ortalama farktır. Yönsüz kurallarda
+                        yalnızca hareketin büyüklüğü gösterilir.
                     </p>
                     <p>
-                        Karar: nEff {SCORECARD_MIN_EARLY}'dan azsa veri toplanıyor; {SCORECARD_MIN_EARLY}–{SCORECARD_MIN_VERDICT - 1} arası ön sonuç;
-                        en az {SCORECARD_MIN_VERDICT} olduğunda t ≥ 2 ve BTC'ye göre pozitifse kenar var, t ≤ −2 ise ters yön, diğer durumlarda kenar yok.
+                        <span className="text-secondary">Ayrıntı</span>: %5 winsorize edilmiş ortalama, en büyük 3 kazanç hariç ortalama ve log getiri
+                        ortalaması (aykırı değerlere dayanıklı); <span className="text-secondary">EW-alt'a göre</span> aynı saatte ve ufukta ölçülen tüm
+                        sinyallerin eşit ağırlıklı ortalama hareketine göre fark (ralli gününün etkisini ayırır); %0,2 / %0,4 / %0,6 gidiş-dönüş maliyetle
+                        ortalama net; saat ve gün kümeli t; ölçüm penceresi.
+                    </p>
+                    <p>
+                        Karar: {SCORECARD_MIN_EARLY} sinyal saatinden azsa veri toplanıyor; {SCORECARD_MIN_EARLY}–{SCORECARD_MIN_VERDICT - 1} arası ön sonuç.
+                        En az {SCORECARD_MIN_VERDICT} saatte: ortalama ile winsorize edilmiş ortalamanın işareti farklıysa <span className="text-secondary">aykırı değere bağlı</span>;
+                        kümeli t ≤ −{SCORECARD_T_SCREEN} ise <span className="text-secondary">ters yön</span>; saat kümeli t ≥ {SCORECARD_T_SCREEN} ise{' '}
+                        <span className="text-secondary">Tarama</span>; ek olarak gün kümeli t ≥ {SCORECARD_T_SCREEN} ve üç sağlam ortalama da pozitifse{' '}
+                        <span className="text-secondary">Aday</span>; gün kümeli t ≥ {SCORECARD_T_VERIFIED} ve pencere en az {SCORECARD_MIN_VERIFIED_DAYS} günse{' '}
+                        <span className="text-secondary">Doğrulanmış</span> ({SCORECARD_MIN_VERIFIED_DAYS} günün altında hiçbir zaman verilmez); diğer durumlarda kenar yok.
                     </p>
                     {rows.some(row => row.shadow) && (
                         <p>
@@ -604,7 +688,8 @@ const ScorecardPanel: React.FC = () => {
                         </p>
                     )}
                     <p className="text-secondary">
-                        Geçmiş sonuçlar gelecek için garanti değildir. Karar için en az 100 bağımsız saatlik örnek gerekir.
+                        Geçmiş sonuçlar gelecek için garanti değildir. Karar için en az {SCORECARD_MIN_VERDICT} bağımsız saatlik örnek, doğrulama için en az{' '}
+                        {SCORECARD_MIN_VERIFIED_DAYS} günlük pencere gerekir.
                     </p>
                 </div>
             </div>

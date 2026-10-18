@@ -143,11 +143,32 @@ toplu kayıtları hariç) ardından fiyatın ne yaptığı ölçülür ve strate
   tarayıcılara `signal_outcome` olayıyla gider; diğerleri sonraki `GET /api/signals` ile alır (her sinyalde `outcome`).
 - **Başlangıç:** Lider süreç açıldığında bir kez son 7 günün sonuç satırı olmayan sinyallerini ekler (en fazla 5000,
   en yenilerden başlayarak; tekrar çalıştırmak çift kayıt üretmez); böylece karne gerçek veriyle başlar.
-- **Karne:** `GET /api/scorecard?days=7|30` (giriş yapmış her kullanıcı, süreç başına 60 sn önbellek) strateji
-  ailesi x ufuk başına örnek sayısı, bağımsız saat sayısı (`nEff`: aynı saatteki sinyaller bir sayılır), isabet oranı
-  (net > 0) ve %95 Wilson aralığı, ortalama / medyan net, BTC'ye göre fark ve karar verir: `nEff` 30'un altında
-  "Veri toplanıyor", 30-99 "Ön sonuç", 100 ve üstünde t ≥ 2 ve BTC'ye göre pozitifse "Maliyet sonrası pozitif",
-  t ≤ −2 ise "Ters yönde tutarlı", aksi halde "Kenar görünmüyor". Geçmiş sonuçlar gelecek için garanti değildir.
+- **Karne:** `GET /api/scorecard?days=7|30|90` (giriş yapmış her kullanıcı, süreç başına 60 sn önbellek) strateji
+  ailesi x ufuk başına şunları verir (`reports/Kripto sinyal kuralları kurumsal yaklaşımlar.md`, "Gölge kurallar için
+  doğrulama protokolü" bölümüne göre):
+  - *Örneklem:* `n` ölçülen kayıt; `nEff` bağımsız küme sayısı — 15 dk ve 1 s ufuklarında sinyal saati (`cluster:
+    'hour'`), 4 s ve 24 s ufuklarında UTC günü (`cluster: 'day'`); `nHours` ve `nDays` her ufukta ayrıca verilir;
+    `spanDays` ilk ve son ölçülen sinyal arasındaki gün sayısıdır.
+  - *İsabet ve ortalamalar:* isabet oranı (net > 0) ve `nEff` üzerinden %95 Wilson aralığı; ortalama / medyan net;
+    sağlam ortalamalar `meanNetWinsor` (%5 winsorize), `meanNetTrimTop` (en büyük 3 kazanç hariç), `meanLogNet`
+    (log(1 + net) ortalaması); `outlierDependent` ortalama ile winsorize edilmiş ortalamanın işareti farklıysa true.
+  - *Kıyas:* `meanExcess` aynı penceredeki BTC hareketine göre fark (korunur); `meanExcessAlt` aynı saatte ve aynı
+    ufukta ölçülen tüm sinyallerin (aile fark etmeksizin) eşit ağırlıklı ortalama ham hareketine göre fark — ralli
+    gününün herkesi yukarı taşıdığı etkiyi seçim becerisinden ayırır.
+  - *Maliyet duyarlılığı:* `costSensitivity` %0,2 / %0,4 / %0,6 gidiş-dönüş maliyetle üç ayrı ortalama net
+    (brüt yön işaretli getiriden düşülür).
+  - *t istatistiği:* `tStatHour` = ortalama net / (sd / √`nHours`) (eski ölçü), `tStatDay` UTC gün ortalamalarından
+    küme-dayanıklı t (her gün bir gözlem; iki ralli gününün saatlik t'yi şişirmesini engeller); `tStat` ufkun küme
+    birimine göre bunlardan biridir.
+  - *Karar (üç kademe, her kademe alttakini içerir):* 30 sinyal saatinden az "Veri toplanıyor", 30-99 "Ön sonuç";
+    100 ve üstünde: ortalama ile winsorize edilmiş ortalamanın işareti farklıysa "Aykırı değere bağlı" (`OUTLIER`);
+    kümeli t ≤ −2 ise "Ters yönde tutarlı" (`REVERSE`); saat kümeli t ≥ 2 ise "Tarama" (`SCREEN`, eski "Maliyet
+    sonrası pozitif"); ek olarak gün kümeli t ≥ 2 ve üç sağlam ortalama da pozitifse "Aday" (`CANDIDATE`); gün kümeli
+    t ≥ 3 ve `spanDays` ≥ 90 ise "Doğrulanmış" (`VERIFIED`; 90 günün altında hiçbir zaman verilmez, bu yüzden 90 günlük
+    dönem eklendi); aksi halde "Kenar görünmüyor". Karne ekranında yeni alanlar varsayılan olarak kapalı "Ayrıntı"
+    bölümündedir. Geçmiş sonuçlar gelecek için garanti değildir.
+- **Testler:** `npm test` (`node --test server/`), `server/outcomes.test.cjs`: gün kümeli t, winsorize / kırpılmış /
+  log ortalamalar, EW-alt kıyası, maliyet duyarlılığı ve kademe kararı.
 - **Gölge kural (`Shadow_SqueezeFuel`, "Gölge · Short sıkışması yakıtı"):** Sinyal göndermez, yalnızca ölçülür
   (`utils/shadowRules.ts`). Motor bir `Momentum_24h_Up` veya `Volume_Spike` BUY sinyali yayınladığında, sembolün USDT-M
   vadeli kontratı varsa (`S`, yoksa `1000S` / `1000000S`) onu 12 saatliğine izlemeye alır ve kontratın açık pozisyonunu
