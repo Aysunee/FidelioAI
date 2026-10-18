@@ -58,10 +58,15 @@ type SignalsApi = ReturnType<typeof useSignals>;
 type SignalSettings = SignalsApi['signalSettings'];
 type EngineCount = SignalsApi['engineStats']['momentum'];
 
-type SettingsField = 'momThreshold' | 'momCooldown' | 'volRatio' | 'volCooldown' | 'fundingThreshold' | 'fundingCooldown';
+type SettingsField = 'momThreshold' | 'momCooldown' | 'volRatio' | 'volCooldown' | 'fundingThreshold' | 'fundingCooldown' | 'liquidityMin';
 type SettingsDraft = Record<SettingsField, string>;
 
+// The liquidity minimum is stored in USDT and edited in million USDT.
+const MILLION = 1_000_000;
+const usdToMillions = (usd: number | undefined): string => (usd === undefined ? '' : String(Number((usd / MILLION).toFixed(3))));
+
 const toDraft = (settings: SignalSettings): SettingsDraft => ({
+    liquidityMin: usdToMillions(settings?.universe?.minMedianVolume),
     momThreshold: String(settings?.momentum?.threshold ?? ''),
     momCooldown: String(settings?.momentum?.cooldownHours ?? ''),
     volRatio: String(settings?.volume?.ratio ?? ''),
@@ -82,7 +87,14 @@ const parseDecimal = (raw: string): number | null => {
 // would clamp. Funding is an 8h-equivalent percent and must be negative.
 const LIMITS = SIGNAL_SETTINGS_LIMITS;
 
+const LIQUIDITY_LIMIT_M = {
+    min: LIMITS.universe.minMedianVolume.min / MILLION,
+    max: LIMITS.universe.minMedianVolume.max / MILLION,
+    default: LIMITS.universe.minMedianVolume.default / MILLION
+};
+
 const SETTING_RULES: Record<SettingsField, { min: number; max: number; default: number; message: string }> = {
+    liquidityMin: { ...LIQUIDITY_LIMIT_M, message: `Hacim eşiği 0 (kapalı) ile ${LIQUIDITY_LIMIT_M.max} milyon USDT arasında olmalı.` },
     momThreshold: { ...LIMITS.momentum.threshold, message: `Eşik %${LIMITS.momentum.threshold.min} ile %${LIMITS.momentum.threshold.max} arasında olmalı.` },
     momCooldown: { ...LIMITS.momentum.cooldownHours, message: `Bekleme ${LIMITS.momentum.cooldownHours.min} ile ${LIMITS.momentum.cooldownHours.max} saat arasında olmalı.` },
     volRatio: { ...LIMITS.volume.ratio, message: `Oran ${LIMITS.volume.ratio.min} ile ${LIMITS.volume.ratio.max} kat arasında olmalı.` },
@@ -671,7 +683,8 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
             version: 2,
             momentum: { threshold: checked.momThreshold.value!, cooldownHours: checked.momCooldown.value! },
             volume: { ratio: checked.volRatio.value!, cooldownHours: checked.volCooldown.value! },
-            funding: { thresholdPct: checked.fundingThreshold.value!, cooldownHours: checked.fundingCooldown.value! }
+            funding: { thresholdPct: checked.fundingThreshold.value!, cooldownHours: checked.fundingCooldown.value! },
+            universe: { minMedianVolume: Math.round(checked.liquidityMin.value! * MILLION) }
         });
         setIsSaving(false);
         // On failure the dialog stays open with the draft (the context showed the reason as a toast).
@@ -682,7 +695,9 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
     const savedMomentum = signalSettings?.momentum?.threshold;
     const savedVolume = signalSettings?.volume?.ratio;
     const savedFunding = signalSettings?.funding?.thresholdPct;
+    const savedLiquidityM = signalSettings?.universe?.minMedianVolume !== undefined ? signalSettings.universe.minMedianVolume / MILLION : undefined;
     const draftDiffers = (field: SettingsField, saved: number | undefined) => !readOnly && parseDecimal(draft[field]) !== (saved ?? null);
+    const liquidity = engineStatus?.liquidity ?? null;
 
     // Extract unique strategies for the filter dropdown
     const uniqueStrategies = useMemo(() => {
@@ -765,6 +780,44 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                         <EngineStatusBlock status={engineStatus} error={engineStatusError} receivedAt={engineStatusAt} now={now} />
                     </div>
 
+                    {/* Universe: liquidity gate */}
+                    <div className="space-y-2 border-t border-border pt-3">
+                        <h3 className={SECTION_TITLE_CLASS}>
+                            <Globe size={12} /> Evren: likidite süzgeci
+                        </h3>
+                        <p className={RULE_TEXT_CLASS}>
+                            Momentum ve hacim motorları yalnızca son 30 tamamlanmış günün günlük hacim medyanı bu eşiğe ulaşan spot USDT
+                            paritelerine bakar; 30 günden genç pariteler hiç geçmez. Medyanlar Binance günlük mumlarından günde bir yüklenir
+                            ve ilk yükleme bitene kadar iki motor taramaz. Fonlama motoru vadeli evrende çalışır, bu süzgeçten etkilenmez.
+                            Küçük ve az işlem gören coinlerde 24 saatlik hareketler ortalama geri döner (ileriye dönük test ve literatür);
+                            süzgeç bu grubu dışarıda bırakır. 0 = kapalı.
+                        </p>
+                        <div className="grid grid-cols-2 gap-3">
+                            <SettingInput
+                                id="signal-liquidity-min"
+                                readOnly={readOnly}
+                                label="30 günlük medyan günlük hacim"
+                                unit="M USDT"
+                                step="0.5"
+                                hint={rangeHint('liquidityMin')}
+                                value={draft.liquidityMin}
+                                error={checked.liquidityMin.error}
+                                onChange={v => updateDraft('liquidityMin', v)}
+                            >
+                                <p className="mt-1 text-[11px] leading-snug text-muted">
+                                    {liquidity === null
+                                        ? 'Motor çalışmıyor.'
+                                        : !liquidity.enabled
+                                            ? 'Süzgeç kapalı.'
+                                            : liquidity.loadedAt === null
+                                                ? 'Medyanlar yükleniyor; momentum ve hacim motorları bekliyor.'
+                                                : `${liquidity.symbols ?? 0} parite geçiyor (${liquidity.known ?? 0} ölçülen, ${liquidity.young ?? 0} genç)`
+                                                    + (draftDiffers('liquidityMin', savedLiquidityM) ? ' · kayıtlı eşiğe göre' : '')}
+                                </p>
+                            </SettingInput>
+                        </div>
+                    </div>
+
                     {/* Momentum */}
                     <div className="space-y-2 border-t border-border pt-3">
                         <h3 className={SECTION_TITLE_CLASS}>
@@ -773,9 +826,9 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                         <p className={RULE_TEXT_CLASS}>
                             Spot USDT paritesinin 24 saatlik değişimi eşiğe ulaşmış (yukarı ya da aşağı) ve fiyat yeni 24 saatlik zirvede
                             (yükselişte) ya da dipte (düşüşte), yani o uca en çok %0.1 uzaklıkta ise kayıt açılır. Kayıt, iki koşulun
-                            birlikte sağlandığı ana girişte bir kez açılır. Yön, hareketin yönüdür. Evren: 24 saatlik hacmi en az
-                            1 milyon USDT olan pariteler; stabil ve wrapped coinler ile 24 saatlik aralığı %0.3'ten dar olanlar hariç.
-                            Bir taramada en çok 5 kayıt açılır (en büyük değişim önce).
+                            birlikte sağlandığı ana girişte bir kez açılır. Yön, hareketin yönüdür. Evren: likidite süzgecini geçen ve
+                            24 saatlik hacmi en az 1 milyon USDT olan pariteler; stabil ve wrapped coinler ile 24 saatlik aralığı
+                            %0.3'ten dar olanlar hariç. Bir taramada en çok 5 kayıt açılır (en büyük değişim önce).
                         </p>
                         <div className="grid grid-cols-2 gap-3">
                             <SettingInput

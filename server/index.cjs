@@ -2116,6 +2116,8 @@ const localEngineView = () => {
         activeFunding: running
             ? snap.activeFunding.map(entry => ({ symbol: entry.symbol, f8: entry.f8Pct / 100, since: entry.since }))
             : [],
+        // Liquidity gate of the momentum / volume engines (30-day median daily volume); null while not running.
+        liquidity: running && snap.liquidity ? snap.liquidity : null,
         telegram: { server: !!(engineTelegram && engineTelegram.enabled) }
     };
 };
@@ -2262,6 +2264,7 @@ const buildEngineStatus = async () => {
         stats: running ? view.stats : idleEngineStats(),
         settings: engineHost.settings,
         activeFunding: running ? view.activeFunding : [],
+        liquidity: running ? (view.liquidity || null) : null,
         telegram: view.telegram,
         signalsToday: signalsToday !== null ? signalsToday : await countSignalsToday(),
         servedBy,
@@ -2293,7 +2296,8 @@ app.put('/api/engine/settings', authenticateToken, requireAdmin, async (req, res
         version: engineModule.SIGNAL_SETTINGS_VERSION,
         momentum: section('momentum'),
         volume: section('volume'),
-        funding: section('funding')
+        funding: section('funding'),
+        universe: section('universe')
     });
 
     if (engineHost.stateTable !== false) {
