@@ -14,6 +14,12 @@
 // The guard state lives in memory only (a restart starts fresh; the evaluators' seeding prevents
 // re-announcing).
 //
+// Liquidity gate (settings.universe.minMedianVolume, default 2 M USDT): momentum and volume only see spot pairs
+// whose median daily quote volume over the last 30 completed days reaches the minimum (daily klines, loaded
+// once a day for every USDT pair of the stream; pairs younger than 30 days never pass). Until the first load
+// the two engines do not scan at all, so a restart cannot announce on an unfiltered universe. Funding is not
+// gated (it runs on the perpetual universe). The medians live in memory only.
+//
 // Shadow rule Shadow_SqueezeFuel (utils/shadowRules.ts, only while the caller passes onShadowSignals): every
 // EMITTED Momentum_24h_Up / Volume_Spike BUY arms its spot symbol when it has a crypto perpetual; the baseline
 // open interest is fetched right after arming, a check every 5 min gates funding + price and fetches the
@@ -32,6 +38,10 @@ import {
     evaluateFunding,
     evaluateMomentum,
     evaluateVolume,
+    filterLiquid,
+    isExcludedSpotBase,
+    LIQUIDITY_MEDIAN_DAYS,
+    SPOT_UNIVERSE,
     sanitizeEngineCooldowns,
     sanitizeSignalSettings,
     stampMomentumCooldowns,
@@ -53,6 +63,7 @@ import {
     loadCryptoPerps,
     loadFundingIntervals,
     loadLatestSettled,
+    loadMedianDailyVolumes,
     loadOpenInterest,
     settledExpiry,
     type SettledFunding,
@@ -97,6 +108,8 @@ export const DEFAULT_TIMING: EngineTiming = {
     metaRetryMs: 60 * 1000,
     settledTtlMs: 10 * 60 * 1000,
     pruneMs: 60 * 60 * 1000,
+    liquidityTtlMs: 24 * 60 * 60 * 1000,
+    liquidityRetryMs: 2 * 60 * 1000,
     autoScan: true,
 };
 
@@ -114,6 +127,7 @@ const KIND_OF_SCAN: Record<ScanKind, EngineKind> = { momentum: 'MOMENTUM', volum
 const DEFAULT_FUNDING_INTERVAL_HOURS = 8; // a contract missing from the LOADED interval map settles every 8 h
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const formatMillions = (usd: number): string => `${(usd / 1_000_000).toLocaleString('tr-TR', { maximumFractionDigits: 2 })} M USDT`;
 
 const lazyGlobalFetch: FetchLike = (url, init) => {
     if (typeof globalThis.fetch !== 'function') return Promise.reject(new Error('fetch yok (Node 18+ gerekir)'));
@@ -154,6 +168,14 @@ export function createEngine(options: CreateEngineOptions): Engine {
     let settledLoadedAt = 0;
     let settledExpires = 0;
     let settledInFlight = false;
+
+    // Liquidity gate (REST daily klines): symbol -> 30-day median daily quote volume
+    let medians: Map<string, number> | null = null;
+    let mediansYoung = 0;
+    let liquidityLoadedAt = 0;
+    let liquidityFailedAt = 0;
+    let liquidityInFlight = false;
+    let liquidityWaitLogged = false;
 
     // Evaluator state
     let momentumState = createMomentumState();
@@ -296,14 +318,34 @@ export function createEngine(options: CreateEngineOptions): Engine {
         if (scan !== 'funding') armShadow(signals);
     };
 
+    const liquidityOn = () => settings.universe.minMedianVolume > 0;
+
+    /**
+     * Spot tickers the momentum / volume engines may see, or null while the liquidity gate is on and the
+     * medians have not been loaded yet (the engines then skip the pass instead of scanning unfiltered).
+     */
+    const gatedSpot = (): Ticker[] | null => {
+        const all = Array.from(spot.values());
+        if (!liquidityOn()) return all;
+        if (!medians) {
+            if (!liquidityWaitLogged) {
+                liquidityWaitLogged = true;
+                log.info('[engine] Likidite süzgeci: 30 günlük hacim medyanları yüklenene kadar momentum ve hacim motorları taramıyor');
+            }
+            return null;
+        }
+        return filterLiquid(all, medians, settings.universe.minMedianVolume);
+    };
+
     const momentumPass = () => {
         if (!running) return;
-        if (streamState('spotMini') !== 'connected' || spot.size === 0) {
+        const tickers = streamState('spotMini') === 'connected' && spot.size > 0 ? gatedSpot() : null;
+        if (!tickers) {
             stats.momentum = EMPTY_ENGINE_STAT;
             return;
         }
         const t = now();
-        const result = evaluateMomentum(Array.from(spot.values()), settings.momentum, momentumState, cooldowns.momentum, t);
+        const result = evaluateMomentum(tickers, settings.momentum, momentumState, cooldowns.momentum, t);
         momentumState = result.state;
         stats.momentum = result.stat;
         stats.updatedAt = t;
@@ -320,12 +362,13 @@ export function createEngine(options: CreateEngineOptions): Engine {
 
     const volumePass = () => {
         if (!running) return;
-        if (streamState('spotMini') !== 'connected' || spot.size === 0) {
+        const tickers = streamState('spotMini') === 'connected' && spot.size > 0 ? gatedSpot() : null;
+        if (!tickers) {
             stats.volume = EMPTY_ENGINE_STAT;
             return;
         }
         const t = now();
-        const result = evaluateVolume(Array.from(spot.values()), hour, settings.volume, volumeState, cooldowns.volume, t);
+        const result = evaluateVolume(tickers, hour, settings.volume, volumeState, cooldowns.volume, t);
         volumeState = result.state;
         stats.volume = result.stat;
         stats.updatedAt = t;
@@ -410,6 +453,52 @@ export function createEngine(options: CreateEngineOptions): Engine {
         }
     };
 
+    // Every USDT pair of the stream except the pegged bases (the 24h-volume / range checks of the spot universe
+    // are per pass; the medians cover whatever the engines might look at over the day).
+    const liquidityCandidates = (): string[] => {
+        const out: string[] = [];
+        for (const symbol of spot.keys()) {
+            if (!symbol.endsWith(SPOT_UNIVERSE.quote)) continue;
+            const base = symbol.slice(0, -SPOT_UNIVERSE.quote.length);
+            if (!base || isExcludedSpotBase(base)) continue;
+            out.push(symbol);
+        }
+        return out;
+    };
+
+    const refreshLiquidity = async () => {
+        if (!running || liquidityInFlight || !liquidityOn()) return;
+        const t = now();
+        const due = !medians || t - liquidityLoadedAt >= timing.liquidityTtlMs;
+        if (!due || t - liquidityFailedAt < timing.liquidityRetryMs) return;
+        if (streamState('spotMini') !== 'connected' || spot.size === 0) return; // symbols come from the stream
+        const symbols = liquidityCandidates();
+        if (symbols.length === 0) return;
+        liquidityInFlight = true;
+        try {
+            const load = await loadMedianDailyVolumes(deps.fetch, symbols, LIQUIDITY_MEDIAN_DAYS, now);
+            if (!running) return;
+            // A rate-limited or mostly failed load keeps the previous medians (or keeps the engines waiting).
+            const usable = !load.aborted && load.failed <= Math.max(5, Math.ceil(symbols.length * 0.2));
+            if (!usable) {
+                liquidityFailedAt = now();
+                log.warn(`[engine] Likidite süzgeci: hacim medyanları yüklenemedi (${load.failed} / ${symbols.length} istek başarısız${load.aborted ? ', Binance istek sınırı' : ''}); ${medians ? 'eski liste kullanılıyor' : 'motorlar bekliyor'}`);
+                return;
+            }
+            const first = !medians;
+            medians = load.medians;
+            mediansYoung = load.young;
+            liquidityLoadedAt = now();
+            const passing = filterLiquid(Array.from(spot.values()), medians, settings.universe.minMedianVolume).length;
+            log.info(`[engine] Likidite süzgeci ${first ? 'yüklendi' : 'yenilendi'}: ${symbols.length} parite, ${medians.size} medyan, ${load.young} genç (<${LIQUIDITY_MEDIAN_DAYS} gün), ${load.failed} hata; ${passing} parite ${formatMillions(settings.universe.minMedianVolume)} eşiğini geçiyor`);
+        } catch (err) {
+            liquidityFailedAt = now();
+            log.warn(`[engine] Likidite süzgeci: hacim medyanları yüklenemedi: ${errorText(err)}`);
+        } finally {
+            liquidityInFlight = false;
+        }
+    };
+
     const prune = () => {
         const t = now();
         let newestSpot = 0;
@@ -473,11 +562,14 @@ export function createEngine(options: CreateEngineOptions): Engine {
         openStreams();
         const meta = background(refreshMeta);
         const settledTask = background(refreshSettled);
+        const liquidityTask = background(refreshLiquidity);
         meta();
         settledTask();
         timers = [
             setInterval(meta, Math.min(timing.metaRetryMs, timing.metaTtlMs)),
             setInterval(settledTask, Math.min(timing.metaRetryMs, timing.settledTtlMs)),
+            // Checked often: the first load waits for the spot stream, later ones are due once a day.
+            setInterval(liquidityTask, Math.min(timing.liquidityRetryMs, timing.liquidityTtlMs, 5000)),
             setInterval(prune, timing.pruneMs),
         ];
         if (timing.autoScan) {
@@ -507,6 +599,11 @@ export function createEngine(options: CreateEngineOptions): Engine {
         shadowState = createSqueezeFuelState();
         shadowGen++;
         baselineInFlight.clear();
+        medians = null;
+        mediansYoung = 0;
+        liquidityLoadedAt = 0;
+        liquidityFailedAt = 0;
+        liquidityWaitLogged = false;
         stats.momentum = EMPTY_ENGINE_STAT;
         stats.volume = EMPTY_ENGINE_STAT;
         stats.funding = EMPTY_ENGINE_STAT;
@@ -515,7 +612,12 @@ export function createEngine(options: CreateEngineOptions): Engine {
     };
 
     const updateSettings = (raw: unknown): SignalSettings => {
+        const before = settings.universe.minMedianVolume;
         settings = sanitizeSignalSettings(raw);
+        // A changed liquidity minimum re-filters from the loaded medians: pairs that drop out stop being
+        // evaluated, pairs that come in are seeded on their next sight (never announced on arrival). Switching
+        // the gate on without medians makes the two engines wait for the load, which starts at the next tick.
+        if (settings.universe.minMedianVolume !== before) liquidityFailedAt = 0;
         // The evaluators compare the threshold with the one they seeded with: a change re-seeds silently.
         // Run the passes at once so the counters follow the new thresholds immediately.
         if (running) setImmediate(() => scanNow());
@@ -549,6 +651,14 @@ export function createEngine(options: CreateEngineOptions): Engine {
                 settledFunding: settled ? settled.size : null,
                 metaLoadedAt: metaLoadedAt || null,
                 settledLoadedAt: settledLoadedAt || null,
+            },
+            liquidity: {
+                enabled: liquidityOn(),
+                minMedianVolume: settings.universe.minMedianVolume,
+                symbols: medians ? filterLiquid(Array.from(spot.values()), medians, settings.universe.minMedianVolume).length : null,
+                known: medians ? medians.size : null,
+                young: medians ? mediansYoung : null,
+                loadedAt: liquidityLoadedAt || null,
             },
             ...(shadowOn ? { shadow: squeezeFuelStatus(shadowState, now()) } : {}),
         };

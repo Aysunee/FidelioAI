@@ -43,6 +43,14 @@ export interface SignalSettings {
         thresholdPct: number;  // 8h-equivalent funding in percent. default -0.05, allowed -1 … -0.03
         cooldownHours: number; // per symbol. default 4, min 4, max 48
     };
+    /**
+     * Liquidity gate of the momentum and volume engines (not of funding, which runs on perpetuals): a spot pair
+     * must have a median daily quote volume over the last 30 completed days of at least this many USDT.
+     * 0 = off. Pairs younger than 30 days never pass. default 2 000 000, max 50 000 000.
+     */
+    universe: {
+        minMedianVolume: number;
+    };
 }
 
 export const SIGNAL_SETTINGS_VERSION = 2 as const;
@@ -61,7 +69,13 @@ export const SIGNAL_SETTINGS_LIMITS = {
         thresholdPct: { min: -1, max: -0.03, default: -0.05 },
         cooldownHours: { min: 4, max: 48, default: 4 },
     },
+    universe: {
+        minMedianVolume: { min: 0, max: 50_000_000, default: 2_000_000 },
+    },
 } as const;
+
+/** Completed daily candles the liquidity gate's median is taken over (and the minimum age of a pair). */
+export const LIQUIDITY_MEDIAN_DAYS = 30;
 
 export const DEFAULT_SIGNAL_SETTINGS: SignalSettings = {
     version: SIGNAL_SETTINGS_VERSION,
@@ -76,6 +90,9 @@ export const DEFAULT_SIGNAL_SETTINGS: SignalSettings = {
     funding: {
         thresholdPct: SIGNAL_SETTINGS_LIMITS.funding.thresholdPct.default,
         cooldownHours: SIGNAL_SETTINGS_LIMITS.funding.cooldownHours.default,
+    },
+    universe: {
+        minMedianVolume: SIGNAL_SETTINGS_LIMITS.universe.minMedianVolume.default,
     },
 };
 
@@ -104,11 +121,14 @@ export function sanitizeSignalSettings(raw: unknown): SignalSettings {
             momentum: { ...DEFAULT_SIGNAL_SETTINGS.momentum },
             volume: { ...DEFAULT_SIGNAL_SETTINGS.volume },
             funding: { ...DEFAULT_SIGNAL_SETTINGS.funding },
+            universe: { ...DEFAULT_SIGNAL_SETTINGS.universe },
         };
     }
     const mom = isRecord(raw.momentum) ? raw.momentum : {};
     const vol = isRecord(raw.volume) ? raw.volume : {};
     const fund = isRecord(raw.funding) ? raw.funding : {};
+    // Settings stored before the liquidity gate existed have no `universe`: they get the default (gate on).
+    const uni = isRecord(raw.universe) ? raw.universe : {};
     const L = SIGNAL_SETTINGS_LIMITS;
     return {
         version: SIGNAL_SETTINGS_VERSION,
@@ -123,6 +143,9 @@ export function sanitizeSignalSettings(raw: unknown): SignalSettings {
         funding: {
             thresholdPct: clampSetting(fund.thresholdPct, L.funding.thresholdPct),
             cooldownHours: clampSetting(fund.cooldownHours, L.funding.cooldownHours),
+        },
+        universe: {
+            minMedianVolume: clampSetting(uni.minMedianVolume, L.universe.minMedianVolume),
         },
     };
 }
@@ -306,6 +329,28 @@ export function inSpotUniverse(t: Ticker, dataAt = 0): boolean {
     if (!(((t.highPrice - t.lowPrice) / t.lowPrice) * 100 >= SPOT_UNIVERSE.minRangePct)) return false;
     if (dataAt > 0 && Number.isFinite(t.updatedAt) && dataAt - t.updatedAt > SPOT_UNIVERSE.staleMs) return false;
     return true;
+}
+
+/** Median of finite values (null when there are none). */
+export function median(values: readonly number[]): number | null {
+    const sorted = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+    if (sorted.length === 0) return null;
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Liquidity gate (settings.universe.minMedianVolume): the tickers whose 30-day median daily quote volume
+ * reaches the minimum. `medians` maps symbol -> median USDT (symbols without an entry are too young or
+ * unknown and fail). A minimum of 0 switches the gate off and returns the input unchanged.
+ */
+export function filterLiquid(tickers: readonly Ticker[], medians: ReadonlyMap<string, number> | null, minMedianVolume: number): Ticker[] {
+    if (!(minMedianVolume > 0)) return tickers.slice();
+    if (!medians) return [];
+    return tickers.filter((t) => {
+        const m = medians.get(t.symbol);
+        return typeof m === 'number' && m >= minMedianVolume;
+    });
 }
 
 export function selectSpotUniverse(tickers: readonly Ticker[]): { universe: Ticker[]; dataAt: number } {

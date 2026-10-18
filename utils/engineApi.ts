@@ -38,6 +38,9 @@ export interface EngineStatus {
     stats: EngineStats;
     settings: SignalSettings;               // global for everyone
     activeFunding: EngineActiveFunding[];
+    // Liquidity gate of the momentum / volume engines (settings.universe.minMedianVolume): null while the engine
+    // is not running or on older servers. symbols / known / young / loadedAt are null until the first load.
+    liquidity: EngineLiquidityStatus | null;
     telegram: { server: boolean };          // the server sends engine signals to Telegram itself
     signalsToday: number;                   // engine signals since 00:00 UTC
     // The host runs several Node processes; any of them may answer.
@@ -46,6 +49,15 @@ export interface EngineStatus {
     leaderStale: boolean;                   // standby answered and the leader's heartbeat is older than 20 s (or missing)
     // Shadow rules (measured only, never sent); in-memory on the leader. Missing on older servers.
     shadow?: EngineShadowStatus;
+}
+
+export interface EngineLiquidityStatus {
+    enabled: boolean;
+    minMedianVolume: number;                // USDT
+    symbols: number | null;                 // pairs passing the minimum right now
+    known: number | null;                   // pairs with a 30-day median
+    young: number | null;                   // pairs with fewer than 30 completed days (never pass)
+    loadedAt: number | null;
 }
 
 export interface EngineShadowStatus {
@@ -101,6 +113,18 @@ const toActiveFunding = (value: unknown): EngineActiveFunding[] => {
     return list.slice(0, 500);
 };
 
+const toLiquidity = (raw: unknown): EngineLiquidityStatus | null => {
+    if (!isRecord(raw)) return null;
+    return {
+        enabled: raw.enabled === true,
+        minMedianVolume: Math.max(0, finiteOr(raw.minMedianVolume, 0)),
+        symbols: finiteOr(raw.symbols, null),
+        known: finiteOr(raw.known, null),
+        young: finiteOr(raw.young, null),
+        loadedAt: finiteOr(raw.loadedAt, null)
+    };
+};
+
 /** Raw response -> a complete EngineStatus. Throws only when the body is not an object at all. */
 export const normalizeEngineStatus = (raw: unknown): EngineStatus => {
     if (!isRecord(raw)) throw new Error('Motor durumu okunamadı.');
@@ -140,6 +164,7 @@ export const normalizeEngineStatus = (raw: unknown): EngineStatus => {
         },
         settings: sanitizeSignalSettings(raw.settings),
         activeFunding: toActiveFunding(raw.activeFunding),
+        liquidity: toLiquidity(raw.liquidity),
         telegram: { server: telegram.server === true },
         signalsToday: Math.max(0, finiteOr(raw.signalsToday, 0)),
         servedBy: raw.servedBy === 'leader' || raw.servedBy === 'standby' || raw.servedBy === 'off' ? raw.servedBy : null,
