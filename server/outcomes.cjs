@@ -537,8 +537,11 @@ const FIXED_FAMILIES = Object.freeze([
     { key: 'Volume_Spike:NEUTRAL', label: 'Hacim Sıçraması (yönsüz)', engine: 'VOLUME', side: 'NEUTRAL', family: 'Volume_Spike', neutral: true },
     { key: 'Funding_Regime_Neg', label: 'Negatif Fonlama Rejimi', engine: 'FUNDING', side: 'NEUTRAL', family: 'Funding_Regime_Neg', neutral: true },
     // Shadow rule: never sent as a signal, only measured (spot, same cost as the base BUY rules it is compared with).
-    { key: 'Shadow_SqueezeFuel', label: 'Gölge · Short sıkışması yakıtı', engine: 'SHADOW', side: 'BUY', family: 'Shadow_SqueezeFuel', neutral: false, shadow: true }
+    { key: 'Shadow_SqueezeFuel', label: 'Gölge · Short sıkışması yakıtı', engine: 'SHADOW', side: 'BUY', family: 'Shadow_SqueezeFuel', neutral: false, shadow: true },
+    { key: 'Shadow_Confluence', label: 'Gölge · Momentum + hacim çakışması', engine: 'SHADOW', side: 'BUY', family: 'Shadow_Confluence', neutral: false, shadow: true }
 ].map(f => Object.freeze(f)));
+
+const SHADOW_STRATEGIES = Object.freeze(FIXED_FAMILIES.filter(f => f.shadow === true).map(f => f.key));
 
 const sideKind = (side) => {
     const d = sideDirection(side);
@@ -554,7 +557,7 @@ const familyOf = (row) => {
     const source = String(row.source || '');
     if (source.startsWith('ALGO_') || ENGINE_KINDS.includes(row.engine)) {
         const engine = ENGINE_KINDS.includes(row.engine) ? row.engine : ENGINE_BY_SOURCE[source] || null;
-        if (strategy === 'Momentum_24h_Up' || strategy === 'Momentum_24h_Down' || strategy === 'Funding_Regime_Neg' || strategy === 'Shadow_SqueezeFuel') {
+        if (strategy === 'Momentum_24h_Up' || strategy === 'Momentum_24h_Down' || strategy === 'Funding_Regime_Neg' || SHADOW_STRATEGIES.includes(strategy)) {
             return { key: strategy, fixed: true };
         }
         if (strategy.startsWith('Volume_Spike')) return { key: `Volume_Spike:${sideKind(row.side)}`, fixed: true };

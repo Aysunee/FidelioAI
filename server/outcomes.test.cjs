@@ -188,6 +188,32 @@ test('neutral stats carry the new fields as null', () => {
     assert.deepEqual(stats.costSensitivity.map(c => c.meanNet), [null, null, null]);
 });
 
+// ---- shadow families ----
+test('Shadow_Confluence is a fixed shadow family that closes the scorecard after the base rows', () => {
+    const horizon = JSON.stringify({ raw: 0.02, ret: 0.02, net: 0.018, excess: 0.02, mfe: 0.02, mae: 0, btc: 0 });
+    const row = (id, strategy, engine, source, t0) => ({ signal_id: id, symbol: 'MAGICUSDT', market: 'spot', side: 'BUY', strategy, engine, source, t0, status: 'done', o15: horizon, o60: horizon, o240: horizon, o1440: horizon });
+    const rows = [
+        row('shadow_c1', 'Shadow_Confluence', 'SHADOW', 'ALGO_SHADOW', T0),
+        row('shadow_s1', 'Shadow_SqueezeFuel', 'SHADOW', 'ALGO_SHADOW', T0 + HOUR_MS),
+        row('m1', 'Momentum_24h_Up', 'MOMENTUM', 'ALGO_MOMENTUM', T0 + 2 * HOUR_MS)
+    ];
+    const sc = o.buildScorecard(rows, { days: 7, now: T0 + DAY_MS });
+    const confluence = sc.rows.find(r => r.key === 'Shadow_Confluence');
+    assert.ok(confluence, 'Shadow_Confluence row missing');
+    assert.equal(confluence.shadow, true);
+    assert.equal(confluence.engine, 'SHADOW');
+    assert.equal(confluence.side, 'BUY');
+    assert.equal(confluence.label, 'Gölge · Momentum + hacim çakışması');
+    assert.equal(confluence.total, 1);
+    const def = o.FIXED_FAMILIES.find(f => f.key === 'Shadow_Confluence');
+    assert.ok(def && def.shadow === true && def.family === 'Shadow_Confluence');
+    // Shadow rows come last, squeeze fuel before confluence (FIXED_FAMILIES order); base rows first.
+    const keys = sc.rows.map(r => r.key);
+    assert.ok(keys.indexOf('Momentum_24h_Up') < keys.indexOf('Shadow_SqueezeFuel'));
+    assert.ok(keys.indexOf('Shadow_SqueezeFuel') < keys.indexOf('Shadow_Confluence'));
+    assert.equal(sc.rows.find(r => r.key === 'Shadow_SqueezeFuel').shadow, true);
+});
+
 // ---- registration of TradingView webhook signals (no DB, no network: fake pool + fake fetch) ----
 
 const EXCHANGE_INFO = JSON.stringify({ symbols: [{ symbol: 'BTCUSDT', status: 'TRADING' }, { symbol: 'ETHUSDT', status: 'TRADING' }] });

@@ -165,8 +165,10 @@ export interface ScorecardRow {
     byHorizon: Record<ScorecardHorizon, ScorecardStats>;
 }
 
-// The one shadow rule so far: short-squeeze fuel after a BUY of the momentum / volume rules.
+// Shadow rules: short-squeeze fuel after a BUY of the momentum / volume rules; momentum + volume BUY confluence.
 export const SHADOW_SQUEEZE_FAMILY = 'Shadow_SqueezeFuel';
+export const SHADOW_CONFLUENCE_FAMILY = 'Shadow_Confluence';
+const SHADOW_FAMILIES: readonly string[] = [SHADOW_SQUEEZE_FAMILY, SHADOW_CONFLUENCE_FAMILY];
 
 export interface Scorecard {
     generatedAt: number;
@@ -323,7 +325,7 @@ const normalizeRow = (raw: unknown, index: number): ScorecardRow | null => {
         engine,
         side: neutral ? 'NEUTRAL' : side,
         family,
-        shadow: raw.shadow === true || engine === 'SHADOW' || family === SHADOW_SQUEEZE_FAMILY,
+        shadow: raw.shadow === true || engine === 'SHADOW' || SHADOW_FAMILIES.includes(family),
         total: nonNegativeInt(raw.total),
         byHorizon: stats
     };
