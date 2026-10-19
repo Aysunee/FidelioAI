@@ -110,24 +110,45 @@ export const mergeSignalOutcome = (
     return unchanged ? prev : merged;
 };
 
-// --- Scorecard (GET /api/scorecard?days=7|30) ---
+// --- Scorecard (GET /api/scorecard?days=7|30|90) ---
 
-export type ScorecardVerdict = 'COLLECTING' | 'EARLY' | 'EDGE' | 'NO_EDGE' | 'REVERSE' | 'NEUTRAL';
-export type ScorecardDays = 7 | 30;
+// Three tiers (SCREEN < CANDIDATE < VERIFIED) replace the old single EDGE verdict, which an older server may
+// still send; OUTLIER marks a mean whose sign hangs on a few extreme values.
+export type ScorecardVerdict =
+    | 'COLLECTING' | 'EARLY' | 'SCREEN' | 'CANDIDATE' | 'VERIFIED' | 'OUTLIER' | 'EDGE' | 'NO_EDGE' | 'REVERSE' | 'NEUTRAL';
+export type ScorecardDays = 7 | 30 | 90;
+export type ScorecardCluster = 'hour' | 'day';
+
+export interface ScorecardCostPoint {
+    cost: number;                      // round-trip cost as a fraction (0.002 = 0.2 %)
+    meanNet: number | null;            // mean gross return minus that cost
+}
 
 export interface ScorecardStats {
     n: number;                         // measured signals
-    nEff: number;                      // distinct hour buckets (clustered signals count once)
+    nEff: number;                      // independent clusters of the horizon's unit (hours at 15 m / 1 h, UTC days at 4 h / 24 h)
+    cluster: ScorecardCluster;         // unit of nEff and tStat
+    nHours: number;                    // distinct signal hours
+    nDays: number;                     // distinct UTC days
+    spanDays: number | null;           // days between the first and the last measured signal
     hitRate: number | null;            // share of signals with a positive net result (directional rows)
     hitCi: [number, number] | null;    // Wilson 95 % interval on nEff
     meanNet: number | null;
     medianNet: number | null;
+    meanNetWinsor: number | null;      // 5 % winsorized mean of net
+    meanNetTrimTop: number | null;     // mean of net without the 3 largest gains
+    meanLogNet: number | null;         // mean of log(1 + net)
+    outlierDependent: boolean;         // mean and winsorized mean disagree in sign
     meanExcess: number | null;         // against BTC over the same window
+    meanExcessAlt: number | null;      // against the equal-weight mean move of every signal of the same hour and horizon
+    costSensitivity: ScorecardCostPoint[]; // net mean at 0.2 / 0.4 / 0.6 % round trip
     medianRaw: number | null;
     medianAbsRaw: number | null;
     medianMfe: number | null;
     medianMae: number | null;
-    tStat: number | null;
+    tStat: number | null;              // cluster-robust t of the horizon's unit (= tStatHour or tStatDay)
+    tStatHour: number | null;          // meanNet / (sd / sqrt(nHours)) — the 'Tarama' threshold
+    tStatDay: number | null;           // t of the UTC day means — the 'Aday' / 'Doğrulanmış' thresholds
     verdict: ScorecardVerdict;
     verdictText: string;
 }
@@ -151,16 +172,23 @@ export interface Scorecard {
     generatedAt: number;
     days: number;
     costs: { spot: number; perp: number };
+    costSensitivity: number[];         // round-trip costs of ScorecardStats.costSensitivity
+    minVerifiedDays: number;           // measurement window needed for 'Doğrulanmış'
     horizons: ScorecardHorizon[];
     pending: number;
     rows: ScorecardRow[];
 }
 
-const VERDICTS = new Set<ScorecardVerdict>(['COLLECTING', 'EARLY', 'EDGE', 'NO_EDGE', 'REVERSE', 'NEUTRAL']);
+const VERDICTS = new Set<ScorecardVerdict>(['COLLECTING', 'EARLY', 'SCREEN', 'CANDIDATE', 'VERIFIED', 'OUTLIER', 'EDGE', 'NO_EDGE', 'REVERSE', 'NEUTRAL']);
 
-// Minimum independent samples before any verdict (the server applies the same rule).
+// Minimum independent signal hours before any verdict, t thresholds and the window of the verified tier (the
+// server applies the same rules).
 export const SCORECARD_MIN_EARLY = 30;
 export const SCORECARD_MIN_VERDICT = 100;
+export const SCORECARD_T_SCREEN = 2;
+export const SCORECARD_T_VERIFIED = 3;
+export const SCORECARD_MIN_VERIFIED_DAYS = 90;
+export const DEFAULT_COST_SENSITIVITY: readonly number[] = [0.002, 0.004, 0.006];
 
 const nonNegativeInt = (value: unknown): number => {
     const n = finiteOrNull(value);
@@ -177,43 +205,98 @@ const toCi = (value: unknown): [number, number] | null => {
     return [a, b];
 };
 
-const emptyStats = (neutral: boolean): ScorecardStats => ({
+// 15 m / 1 h cluster by hour, 4 h / 24 h by UTC day (the server's rule; used when a response lacks `cluster`).
+export const clusterOfHorizon = (horizon: ScorecardHorizon): ScorecardCluster =>
+    horizon === '4h' || horizon === '24h' ? 'day' : 'hour';
+
+const emptyCostSensitivity = (): ScorecardCostPoint[] => DEFAULT_COST_SENSITIVITY.map(cost => ({ cost, meanNet: null }));
+
+const emptyStats = (neutral: boolean, cluster: ScorecardCluster): ScorecardStats => ({
     n: 0,
     nEff: 0,
+    cluster,
+    nHours: 0,
+    nDays: 0,
+    spanDays: null,
     hitRate: null,
     hitCi: null,
     meanNet: null,
     medianNet: null,
+    meanNetWinsor: null,
+    meanNetTrimTop: null,
+    meanLogNet: null,
+    outlierDependent: false,
     meanExcess: null,
+    meanExcessAlt: null,
+    costSensitivity: emptyCostSensitivity(),
     medianRaw: null,
     medianAbsRaw: null,
     medianMfe: null,
     medianMae: null,
     tStat: null,
+    tStatHour: null,
+    tStatDay: null,
     verdict: neutral ? 'NEUTRAL' : 'COLLECTING',
-    verdictText: neutral ? 'Yönsüz — yalnızca hareket büyüklüğü' : `Veri toplanıyor (0/${SCORECARD_MIN_EARLY})`
+    verdictText: neutral ? 'Yönsüz — yalnızca hareket büyüklüğü' : `Veri toplanıyor (0/${SCORECARD_MIN_EARLY} saat)`
 });
 
-const normalizeStats = (raw: unknown, neutral: boolean): ScorecardStats => {
-    if (!isRecord(raw)) return emptyStats(neutral);
+const normalizeCostSensitivity = (raw: unknown): ScorecardCostPoint[] => {
+    if (!Array.isArray(raw)) return emptyCostSensitivity();
+    const points = raw
+        .map((item): ScorecardCostPoint | null => {
+            if (!isRecord(item)) return null;
+            const cost = finiteOrNull(item.cost);
+            return cost === null || cost < 0 ? null : { cost, meanNet: finiteOrNull(item.meanNet) };
+        })
+        .filter((p): p is ScorecardCostPoint => p !== null)
+        .sort((a, b) => a.cost - b.cost);
+    return points.length ? points : emptyCostSensitivity();
+};
+
+const normalizeStats = (raw: unknown, neutral: boolean, horizon: ScorecardHorizon): ScorecardStats => {
+    const defaultCluster = clusterOfHorizon(horizon);
+    if (!isRecord(raw)) return emptyStats(neutral, defaultCluster);
     const verdict = typeof raw.verdict === 'string' && VERDICTS.has(raw.verdict as ScorecardVerdict)
         ? raw.verdict as ScorecardVerdict
         : neutral ? 'NEUTRAL' : 'COLLECTING';
     const hitRate = finiteOrNull(raw.hitRate);
     const n = nonNegativeInt(raw.n);
+    const nEff = Math.min(n || Infinity, nonNegativeInt(raw.nEff));
+    const cluster: ScorecardCluster = raw.cluster === 'day' || raw.cluster === 'hour' ? raw.cluster : defaultCluster;
+    // An older server sends nEff (hours) only.
+    const nHours = raw.nHours === undefined ? (cluster === 'hour' ? nEff : 0) : Math.min(n || Infinity, nonNegativeInt(raw.nHours));
+    const nDays = raw.nDays === undefined ? (cluster === 'day' ? nEff : 0) : Math.min(n || Infinity, nonNegativeInt(raw.nDays));
+    const meanNet = finiteOrNull(raw.meanNet);
+    const meanNetWinsor = finiteOrNull(raw.meanNetWinsor);
+    const spanDays = finiteOrNull(raw.spanDays);
+    const tStat = finiteOrNull(raw.tStat);
     return {
         n,
-        nEff: Math.min(n || Infinity, nonNegativeInt(raw.nEff)),
+        nEff,
+        cluster,
+        nHours,
+        nDays,
+        spanDays: spanDays === null ? null : Math.max(0, spanDays),
         hitRate: hitRate === null ? null : Math.min(1, Math.max(0, hitRate)),
         hitCi: toCi(raw.hitCi),
-        meanNet: finiteOrNull(raw.meanNet),
+        meanNet,
         medianNet: finiteOrNull(raw.medianNet),
+        meanNetWinsor,
+        meanNetTrimTop: finiteOrNull(raw.meanNetTrimTop),
+        meanLogNet: finiteOrNull(raw.meanLogNet),
+        outlierDependent: typeof raw.outlierDependent === 'boolean'
+            ? raw.outlierDependent
+            : meanNet !== null && meanNetWinsor !== null && meanNet * meanNetWinsor < 0,
         meanExcess: finiteOrNull(raw.meanExcess),
+        meanExcessAlt: finiteOrNull(raw.meanExcessAlt),
+        costSensitivity: normalizeCostSensitivity(raw.costSensitivity),
         medianRaw: finiteOrNull(raw.medianRaw),
         medianAbsRaw: finiteOrNull(raw.medianAbsRaw),
         medianMfe: finiteOrNull(raw.medianMfe),
         medianMae: finiteOrNull(raw.medianMae),
-        tStat: finiteOrNull(raw.tStat),
+        tStat,
+        tStatHour: raw.tStatHour === undefined ? (cluster === 'hour' ? tStat : null) : finiteOrNull(raw.tStatHour),
+        tStatDay: raw.tStatDay === undefined ? (cluster === 'day' ? tStat : null) : finiteOrNull(raw.tStatDay),
         verdict,
         verdictText: typeof raw.verdictText === 'string' && raw.verdictText.trim() !== ''
             ? raw.verdictText.slice(0, 120)
@@ -232,7 +315,7 @@ const normalizeRow = (raw: unknown, index: number): ScorecardRow | null => {
     const family = typeof raw.family === 'string' ? raw.family : '';
     const key = typeof raw.key === 'string' && raw.key !== '' ? raw.key : `${family || 'row'}_${side || index}`;
     const stats = {} as Record<ScorecardHorizon, ScorecardStats>;
-    SCORECARD_HORIZONS.forEach(h => { stats[h] = normalizeStats(byHorizon[h], neutral); });
+    SCORECARD_HORIZONS.forEach(h => { stats[h] = normalizeStats(byHorizon[h], neutral, h); });
     const engine = typeof raw.engine === 'string' && raw.engine !== '' ? raw.engine.toUpperCase() : null;
     return {
         key,
@@ -266,6 +349,11 @@ export const normalizeScorecard = (raw: unknown): Scorecard => {
             spot: finiteOrNull(costs.spot) ?? DEFAULT_OUTCOME_COSTS.spot,
             perp: finiteOrNull(costs.perp) ?? DEFAULT_OUTCOME_COSTS.perp
         },
+        costSensitivity: (() => {
+            const list = Array.isArray(raw.costSensitivity) ? raw.costSensitivity.map(finiteOrNull).filter((c): c is number => c !== null && c >= 0) : [];
+            return list.length ? list : [...DEFAULT_COST_SENSITIVITY];
+        })(),
+        minVerifiedDays: Math.max(1, nonNegativeInt(raw.minVerifiedDays) || SCORECARD_MIN_VERIFIED_DAYS),
         horizons: [...SCORECARD_HORIZONS],
         pending: nonNegativeInt(raw.pending),
         rows
@@ -309,10 +397,26 @@ export const outcomeTone = (value: number | null | undefined): string => {
     return rounded > 0 ? 'text-success' : rounded < 0 ? 'text-danger' : 'text-text';
 };
 
+/** Signed t statistic -> "2.31" / "−0.80"; '—' for null. */
+export const formatTStat = (value: number | null | undefined): string => {
+    if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+    const rounded = Number(value.toFixed(2));
+    return `${rounded < 0 ? MINUS : ''}${Math.abs(rounded).toFixed(2)}`;
+};
+
+/** Cluster count with its unit: "42 saat" / "9 gün". */
+export const formatClusterCount = (count: number, cluster: ScorecardCluster): string =>
+    `${count} ${cluster === 'day' ? 'gün' : 'saat'}`;
+
 export const VERDICT_BADGES: Record<ScorecardVerdict, { text: string; tone: string; title: string }> = {
     COLLECTING: { text: 'Toplanıyor', tone: 'bg-surface-secondary text-muted', title: 'Veri toplanıyor' },
     EARLY: { text: 'Ön sonuç', tone: 'bg-warning-soft text-warning', title: 'Ön sonuç — karar için az veri' },
-    EDGE: { text: 'Kenar var', tone: 'bg-success-soft text-success', title: 'Maliyet sonrası pozitif' },
+    SCREEN: { text: 'Tarama', tone: 'bg-success-soft text-success', title: 'Tarama — saat kümeli t ≥ 2' },
+    CANDIDATE: { text: 'Aday', tone: 'bg-success-soft text-success', title: 'Aday — gün kümeli t ≥ 2, sağlam ortalamalar uyumlu' },
+    VERIFIED: { text: 'Doğrulanmış', tone: 'bg-success-soft text-success ring-1 ring-success', title: 'Doğrulanmış — gün kümeli t ≥ 3, pencere ≥ 90 gün' },
+    OUTLIER: { text: 'Aykırı değer', tone: 'bg-warning-soft text-warning', title: 'Aykırı değere bağlı — winsorize edilmiş ortalama ters işaretli' },
+    // Older server: the single-tier 'edge' verdict.
+    EDGE: { text: 'Tarama', tone: 'bg-success-soft text-success', title: 'Maliyet sonrası pozitif (eski tek kademeli karar)' },
     NO_EDGE: { text: 'Kenar yok', tone: 'bg-surface-highlight text-secondary', title: 'Kenar görünmüyor' },
     REVERSE: { text: 'Ters yön', tone: 'bg-danger-soft text-danger', title: 'Ters yönde tutarlı' },
     NEUTRAL: { text: 'Yönsüz', tone: 'bg-info-soft text-info', title: 'Yönsüz — yalnızca hareket büyüklüğü' }

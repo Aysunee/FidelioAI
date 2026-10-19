@@ -2,8 +2,10 @@
 // Every stored signal (except the market-wide 'MARKET' aggregates) gets a row in `signal_outcomes`. The engine
 // leader measures, from Binance klines, what the price did 15 min / 1 h / 4 h / 24 h after the signal and stores
 // it per horizon; GET /api/scorecard summarises it per strategy family. Descriptive only: net of a round-trip
-// cost, benchmarked against BTC over the same window, clustering-aware (nEff = distinct hour buckets), no verdict
-// before enough independent samples, and no direction verdict for NEUTRAL signals.
+// cost (plus a 0.2 / 0.4 / 0.6 % sensitivity), benchmarked against BTC and against the equal-weight mean of every
+// signal measured in the same hour, clustering-aware (hour clusters at 15 m / 1 h, UTC-day clusters at 4 h / 24 h),
+// robust means (winsorized, top-3 trimmed, log) next to the mean, a three-tier verdict (Tarama / Aday /
+// Doğrulanmış) only after enough independent samples, and no direction verdict for NEUTRAL signals.
 //
 // This file has no Express / socket.io inside. server/index.cjs creates one tracker per process with
 // createOutcomeTracker({ db, fetch, now, isLeader, hasTimeMs, emit, log }). Everything below the tracker is pure
@@ -48,13 +50,28 @@ const BTC_CACHE_TTL_MS = 15 * MIN_MS;
 const BACKFILL_DAYS = 7;
 const BACKFILL_MAX_ROWS = 5000;
 const SCORECARD_CACHE_MS = 60 * 1000;
-const SCORECARD_DAYS = Object.freeze([7, 30]);
+const SCORECARD_DAYS = Object.freeze([7, 30, 90]);
 const SCORECARD_MAX_ROWS = 50000;
 // A stored price this far from the market at t0 (factor) is a typo / test input, not a signal: never measured.
 const P0_MAX_RATIO = 1.5;
+// Verdict tiers (reports/Kripto sinyal kuralları kurumsal yaklaşımlar.md, 'Gölge kurallar için doğrulama protokolü'):
+// sample-size gates count distinct signal hours; 'Tarama' (screen) is the old threshold (hour-clustered t >= 2 on
+// >= 100 hours); 'Aday' (candidate) adds a day-clustered t >= 2 and robust means of the same sign; 'Doğrulanmış'
+// (verified) needs a day-clustered t >= 3 over a measurement window of at least 90 days.
 const MIN_NEFF_EARLY = 30;
 const MIN_NEFF_VERDICT = 100;
 const T_EDGE = 2;
+const T_CANDIDATE = 2;
+const T_VERIFIED = 3;
+const MIN_VERIFIED_DAYS = 90;
+// Cluster unit of the uncertainty per horizon: signals of one hour are one sample at 15 m / 1 h; at 4 h / 24 h
+// the signals of one UTC day share the same market day, so the day is the sample.
+const DAY_CLUSTER_MIN_MINUTES = 240;
+// Robust means: share winsorized at each tail, count of the largest gains left out of the trimmed mean.
+const WINSOR_SHARE = 0.05;
+const TRIM_TOP_COUNT = 3;
+// Cost sensitivity: round-trip costs (fraction of price) the net mean is also reported at.
+const COST_SENSITIVITY = Object.freeze([0.002, 0.004, 0.006]);
 // Below this the spread of net results is rounding noise (identical results): no t statistic.
 const SD_EPSILON = 1e-12;
 const Z95 = 1.959963984540054;
@@ -296,6 +313,69 @@ const sampleSd = (xs) => {
 /** Number of distinct UTC hour buckets: signals of one burst (same hour) count once. */
 const effectiveCount = (times) => new Set(times.filter(Number.isFinite).map(t => Math.floor(t / HOUR_MS))).size;
 
+/** Number of distinct UTC days. */
+const dayCount = (times) => new Set(times.filter(Number.isFinite).map(t => Math.floor(t / DAY_MS))).size;
+
+/** Span of the sample times in days (0 for one time; null without times). */
+const spanDaysOf = (times) => {
+    const ts = times.filter(Number.isFinite);
+    if (!ts.length) return null;
+    return (Math.max(...ts) - Math.min(...ts)) / DAY_MS;
+};
+
+/**
+ * Cluster-robust t statistic: the samples are averaged per bucket (floor(t / bucketMs)), then
+ * t = mean(bucket means) / (sd(bucket means) / sqrt(buckets)). Each bucket weighs the same, whatever its size,
+ * so a burst of signals on one rally day is one observation. null below 2 buckets or without spread.
+ * values: [{ t, x }].
+ */
+const clusteredT = (values, bucketMs) => {
+    const sums = new Map();
+    for (const v of values) {
+        if (!Number.isFinite(v.t) || !Number.isFinite(v.x)) continue;
+        const b = Math.floor(v.t / bucketMs);
+        const acc = sums.get(b) || { sum: 0, n: 0 };
+        acc.sum += v.x;
+        acc.n++;
+        sums.set(b, acc);
+    }
+    const means = [...sums.values()].map(a => a.sum / a.n);
+    if (means.length < 2) return null;
+    const sd = sampleSd(means);
+    if (sd === null || sd <= SD_EPSILON) return null;
+    return mean(means) / (sd / Math.sqrt(means.length));
+};
+
+/** Mean with `share` of each tail pulled in to the nearest kept value (5 % by default); below 20 values the plain mean. */
+const winsorizedMean = (xs, share = WINSOR_SHARE) => {
+    if (!xs.length) return null;
+    const s = xs.slice().sort((a, b) => a - b);
+    const k = Math.floor(s.length * share);
+    if (k > 0) {
+        const lo = s[k];
+        const hi = s[s.length - 1 - k];
+        for (let i = 0; i < k; i++) {
+            s[i] = lo;
+            s[s.length - 1 - i] = hi;
+        }
+    }
+    return mean(s);
+};
+
+/** Mean without the `count` largest values; null when nothing is left. */
+const trimmedTopMean = (xs, count = TRIM_TOP_COUNT) => {
+    if (xs.length <= count) return null;
+    const s = xs.slice().sort((a, b) => a - b);
+    return mean(s.slice(0, s.length - count));
+};
+
+/** Mean of log(1 + x): +100 % and −50 % cancel out here, not at +25 %. Values at or below −100 % are left out. */
+const meanLog = (xs) => mean(xs.filter(x => Number.isFinite(x) && 1 + x > 0).map(x => Math.log(1 + x)));
+
+/** Same sign (both positive, both negative, or both rounding to zero). */
+const sameSign = (a, b) => Number.isFinite(a) && Number.isFinite(b)
+    && (a * b > 0 || (Math.abs(a) <= SD_EPSILON && Math.abs(b) <= SD_EPSILON));
+
 /** Wilson 95% interval of the proportion `rate`, with the effective sample size nEff. */
 const wilsonInterval = (rate, nEff) => {
     if (!Number.isFinite(rate) || !(nEff > 0)) return null;
@@ -308,35 +388,78 @@ const wilsonInterval = (rate, nEff) => {
 
 const VERDICT_TEXT = Object.freeze({
     EARLY: 'Ön sonuç — karar için az veri',
-    EDGE: 'Maliyet sonrası pozitif',
+    SCREEN: 'Tarama — saat kümeli t ≥ 2',
+    CANDIDATE: 'Aday — gün kümeli t ≥ 2, sağlam ortalamalar uyumlu',
+    VERIFIED: 'Doğrulanmış — gün kümeli t ≥ 3, pencere ≥ 90 gün',
+    OUTLIER: 'Aykırı değere bağlı — winsorize edilmiş ortalama ters işaretli',
     REVERSE: 'Ters yönde tutarlı',
     NO_EDGE: 'Kenar görünmüyor',
     NEUTRAL: 'Yönsüz — yalnızca hareket büyüklüğü'
 });
 
-const verdictFor = ({ neutral, nEff, tStat, meanExcess }) => {
+/**
+ * Verdict of one family x horizon (three tiers; every tier contains the one below):
+ *  COLLECTING  fewer than 30 distinct signal hours (the text carries the count)
+ *  EARLY       30–99 signal hours
+ *  OUTLIER     the mean and the 5 % winsorized mean disagree in sign: the result hangs on a few extreme values
+ *  REVERSE     cluster-robust t <= −2 (hour clusters at 15 m / 1 h, day clusters at 4 h / 24 h)
+ *  SCREEN      hour-clustered t >= 2 on >= 100 signal hours (the old 'Maliyet sonrası pozitif')
+ *  CANDIDATE   SCREEN and day-clustered t >= 2 and the winsorized / top-3-trimmed / log means are all positive
+ *  VERIFIED    CANDIDATE and day-clustered t >= 3 and the samples span at least 90 days — never below 90 days
+ *  NO_EDGE     otherwise
+ */
+const verdictFor = ({ neutral, nHours, tStat, tStatHour, tStatDay, meanNet, meanNetWinsor, meanNetTrimTop, meanLogNet, spanDays }) => {
     if (neutral) return { verdict: 'NEUTRAL', verdictText: VERDICT_TEXT.NEUTRAL };
-    if (nEff < MIN_NEFF_EARLY) return { verdict: 'COLLECTING', verdictText: `Veri toplanıyor (${nEff}/${MIN_NEFF_EARLY})` };
-    if (nEff < MIN_NEFF_VERDICT) return { verdict: 'EARLY', verdictText: VERDICT_TEXT.EARLY };
-    if (Number.isFinite(tStat) && tStat >= T_EDGE && Number.isFinite(meanExcess) && meanExcess > 0) return { verdict: 'EDGE', verdictText: VERDICT_TEXT.EDGE };
+    if (nHours < MIN_NEFF_EARLY) return { verdict: 'COLLECTING', verdictText: `Veri toplanıyor (${nHours}/${MIN_NEFF_EARLY} saat)` };
+    if (nHours < MIN_NEFF_VERDICT) return { verdict: 'EARLY', verdictText: VERDICT_TEXT.EARLY };
+    if (!sameSign(meanNet, meanNetWinsor)) return { verdict: 'OUTLIER', verdictText: VERDICT_TEXT.OUTLIER };
     if (Number.isFinite(tStat) && tStat <= -T_EDGE) return { verdict: 'REVERSE', verdictText: VERDICT_TEXT.REVERSE };
-    return { verdict: 'NO_EDGE', verdictText: VERDICT_TEXT.NO_EDGE };
+    const screen = Number.isFinite(tStatHour) && tStatHour >= T_EDGE && Number.isFinite(meanNet) && meanNet > 0;
+    if (!screen) return { verdict: 'NO_EDGE', verdictText: VERDICT_TEXT.NO_EDGE };
+    const robust = [meanNetWinsor, meanNetTrimTop, meanLogNet].every(x => Number.isFinite(x) && x > 0);
+    const candidate = robust && Number.isFinite(tStatDay) && tStatDay >= T_CANDIDATE;
+    if (!candidate) return { verdict: 'SCREEN', verdictText: VERDICT_TEXT.SCREEN };
+    const verified = tStatDay >= T_VERIFIED && Number.isFinite(spanDays) && spanDays >= MIN_VERIFIED_DAYS;
+    return verified
+        ? { verdict: 'VERIFIED', verdictText: VERDICT_TEXT.VERIFIED }
+        : { verdict: 'CANDIDATE', verdictText: VERDICT_TEXT.CANDIDATE };
 };
 
+/** 'hour' at 15 m / 1 h, 'day' at 4 h / 24 h. */
+const clusterUnitOf = (minutes) => (minutes >= DAY_CLUSTER_MIN_MINUTES ? 'day' : 'hour');
+
 /**
- * Stats of one family x horizon. samples: [{ t0, raw, net, excess, mfe, mae }] (measured horizons only).
- * Point estimates use every sample; the uncertainty (Wilson interval, t statistic) uses nEff = distinct hour
- * buckets, because signals of one market burst are not independent. hit = net > 0 (after costs).
- * tStat = meanNet / (sd / sqrt(nEff)), sd = sample sd of net over all samples.
+ * Stats of one family x horizon. samples: [{ t0, raw, ret, net, excess, excessAlt, mfe, mae }] (measured
+ * horizons only; ret, excessAlt optional). Point estimates use every sample; the uncertainty uses clusters,
+ * because signals of one market burst are not independent: distinct signal hours at 15 m / 1 h, distinct UTC
+ * days at 4 h / 24 h (`cluster`, nEff = clusters of that unit; nHours and nDays are both reported).
+ *  tStat      hour unit: meanNet / (sd / sqrt(nHours)) as before; day unit: tStatDay
+ *  tStatHour  the hour-based t above, for every horizon (the 'Tarama' threshold)
+ *  tStatDay   t of the UTC day means (clusteredT), for every horizon
+ *  meanNetWinsor / meanNetTrimTop / meanLogNet   5 % winsorized mean, mean without the 3 largest gains, mean log(1 + net)
+ *  outlierDependent   the mean and the winsorized mean disagree in sign
+ *  meanExcessAlt      mean of ret − dir × (mean raw move of every signal measured in the same hour and horizon)
+ *  costSensitivity    [{ cost, meanNet }] of ret − cost at 0.2 / 0.4 / 0.6 % round trip
+ *  spanDays           days between the first and the last sample
+ * hit = net > 0 (after costs); Wilson interval on nEff.
  */
-const computeStats = (samples, { neutral = false } = {}) => {
+const computeStats = (samples, { neutral = false, minutes = 15 } = {}) => {
     const list = neutral
         ? samples.filter(s => isFiniteNumber(s.raw))
         : samples.filter(s => isFiniteNumber(s.raw) && isFiniteNumber(s.net));
     const n = list.length;
-    const nEff = effectiveCount(list.map(s => s.t0));
+    const times = list.map(s => s.t0);
+    const nHours = effectiveCount(times);
+    const nDays = dayCount(times);
+    const cluster = clusterUnitOf(minutes);
+    const nEff = cluster === 'day' ? nDays : nHours;
+    const spanDays = spanDaysOf(times);
     const raws = list.map(s => s.raw);
     const shared = {
+        cluster,
+        nHours,
+        nDays,
+        spanDays,
         medianRaw: median(raws),
         medianAbsRaw: median(raws.map(Math.abs)),
         medianMfe: median(list.map(s => s.mfe).filter(isFiniteNumber)),
@@ -344,17 +467,27 @@ const computeStats = (samples, { neutral = false } = {}) => {
     };
     if (neutral) {
         return {
-            n, nEff, hitRate: null, hitCi: null, meanNet: null, medianNet: null, meanExcess: null,
-            ...shared, tStat: null, ...verdictFor({ neutral: true })
+            n, nEff, hitRate: null, hitCi: null, meanNet: null, medianNet: null, meanExcess: null, meanExcessAlt: null,
+            meanNetWinsor: null, meanNetTrimTop: null, meanLogNet: null, outlierDependent: false,
+            costSensitivity: COST_SENSITIVITY.map(cost => ({ cost, meanNet: null })),
+            ...shared, tStat: null, tStatHour: null, tStatDay: null, ...verdictFor({ neutral: true })
         };
     }
     const nets = list.map(s => s.net);
     const hitRate = n ? nets.filter(x => x > 0).length / n : null;
     const meanNet = mean(nets);
     const sd = sampleSd(nets);
-    const tStat = sd !== null && sd > SD_EPSILON && nEff > 0 ? meanNet / (sd / Math.sqrt(nEff)) : null;
-    const excesses = list.map(s => s.excess).filter(isFiniteNumber);
-    const meanExcess = mean(excesses);
+    const tStatHour = sd !== null && sd > SD_EPSILON && nHours > 0 ? meanNet / (sd / Math.sqrt(nHours)) : null;
+    const tStatDay = clusteredT(list.map(s => ({ t: s.t0, x: s.net })), DAY_MS);
+    const tStat = cluster === 'day' ? tStatDay : tStatHour;
+    const meanExcess = mean(list.map(s => s.excess).filter(isFiniteNumber));
+    const meanExcessAlt = mean(list.map(s => s.excessAlt).filter(isFiniteNumber));
+    const meanNetWinsor = winsorizedMean(nets);
+    const meanNetTrimTop = trimmedTopMean(nets);
+    const meanLogNet = meanLog(nets);
+    // Gross (direction-signed) return at other round-trip costs; rows without `ret` (older data) fall back to net + its cost.
+    const rets = list.map(s => (isFiniteNumber(s.ret) ? s.ret : null)).filter(isFiniteNumber);
+    const costSensitivity = COST_SENSITIVITY.map(cost => ({ cost, meanNet: rets.length ? mean(rets.map(r => r - cost)) : null }));
     return {
         n,
         nEff,
@@ -363,9 +496,17 @@ const computeStats = (samples, { neutral = false } = {}) => {
         meanNet,
         medianNet: median(nets),
         meanExcess,
+        meanExcessAlt,
+        meanNetWinsor,
+        meanNetTrimTop,
+        meanLogNet,
+        outlierDependent: n > 0 && !sameSign(meanNet, meanNetWinsor),
+        costSensitivity,
         ...shared,
         tStat,
-        ...verdictFor({ neutral: false, nEff, tStat, meanExcess })
+        tStatHour,
+        tStatDay,
+        ...verdictFor({ neutral: false, nHours, tStat, tStatHour, tStatDay, meanNet, meanNetWinsor, meanNetTrimTop, meanLogNet, spanDays })
     };
 };
 
@@ -407,6 +548,31 @@ const familyOf = (row) => {
 
 const DYNAMIC_ORDER = { WEBHOOK: 0, MANUAL: 1, OTHER: 2 };
 
+const altKey = (label, t0) => `${label}|${Math.floor(t0 / HOUR_MS)}`;
+
+/**
+ * Equal-weight altcoin benchmark: per horizon and signal hour, the sum and count of the raw moves of every measured
+ * signal (every family, every side, shadow rows included). A signal's EW-alt excess is its direction-signed return
+ * against this mean, so a day on which every altcoin rallied no longer looks like selection skill.
+ * parsed: [{ t0, h: { [label]: horizon | null } }] -> Map(altKey -> { sum, n }).
+ */
+const buildAltBenchmark = (parsed) => {
+    const acc = new Map();
+    for (const p of parsed) {
+        if (!Number.isFinite(p.t0)) continue;
+        for (const h of HORIZONS) {
+            const v = p.h[h.label];
+            if (!v || v.error !== undefined || !isFiniteNumber(v.raw)) continue;
+            const key = altKey(h.label, p.t0);
+            const a = acc.get(key) || { sum: 0, n: 0 };
+            a.sum += v.raw;
+            a.n++;
+            acc.set(key, a);
+        }
+    }
+    return acc;
+};
+
 /**
  * Scorecard from outcome rows (pure). rows: signal_outcomes rows of the period. Skipped rows are left out;
  * pending = rows of the period that still wait for at least one horizon.
@@ -426,8 +592,17 @@ const buildScorecard = (rows, { days, now }) => {
         }
         groups.get(fam.key).rows.push(row);
     }
+    // Parse once; the equal-weight altcoin benchmark needs every measured horizon of every family.
+    for (const g of groups.values()) {
+        g.parsed = g.rows.map(r => ({
+            t0: Number(r.t0),
+            dir: sideDirection(r.side),
+            h: Object.fromEntries(HORIZONS.map(h => [h.label, parseHorizon(r[h.column])]))
+        }));
+    }
+    const altBenchmark = buildAltBenchmark([...groups.values()].flatMap(g => g.parsed));
     const out = [];
-    for (const { def, rows: list } of groups.values()) {
+    for (const { def, rows: list, parsed } of groups.values()) {
         let side = def.side;
         let neutral = def.neutral;
         if (side === null) {
@@ -435,16 +610,17 @@ const buildScorecard = (rows, { days, now }) => {
             side = kinds.size === 1 ? [...kinds][0] : 'MIXED';
             neutral = kinds.size === 1 && kinds.has('NEUTRAL');
         }
-        const parsed = list.map(r => ({ t0: Number(r.t0), h: Object.fromEntries(HORIZONS.map(h => [h.label, parseHorizon(r[h.column])])) }));
         const byHorizon = {};
         for (const h of HORIZONS) {
             const samples = [];
             for (const p of parsed) {
                 const v = p.h[h.label];
                 if (!v || v.error !== undefined) continue;
-                samples.push({ t0: p.t0, raw: v.raw, net: v.net, excess: v.excess, mfe: v.mfe, mae: v.mae });
+                const alt = altBenchmark.get(altKey(h.label, p.t0));
+                const excessAlt = p.dir !== 0 && isFiniteNumber(v.raw) && alt ? p.dir * (v.raw - alt.sum / alt.n) : null;
+                samples.push({ t0: p.t0, raw: v.raw, ret: v.ret, net: v.net, excess: v.excess, excessAlt, mfe: v.mfe, mae: v.mae });
             }
-            byHorizon[h.label] = computeStats(samples, { neutral });
+            byHorizon[h.label] = computeStats(samples, { neutral, minutes: h.minutes });
         }
         const row = { key: def.key, label: def.label, engine: def.engine, side, family: def.family, total: list.length, byHorizon, _fixed: FIXED_FAMILIES.includes(def) };
         if (def.shadow === true) row.shadow = true;
@@ -469,6 +645,8 @@ const buildScorecard = (rows, { days, now }) => {
         generatedAt: now,
         days,
         costs: { spot: COSTS.spot, perp: COSTS.perp },
+        costSensitivity: COST_SENSITIVITY.slice(),
+        minVerifiedDays: MIN_VERIFIED_DAYS,
         horizons: HORIZON_LABELS.slice(),
         pending,
         rows: out
@@ -1055,6 +1233,10 @@ module.exports = {
     P0_MAX_RATIO,
     MIN_NEFF_EARLY,
     MIN_NEFF_VERDICT,
+    MIN_VERIFIED_DAYS,
+    T_CANDIDATE,
+    T_VERIFIED,
+    COST_SENSITIVITY,
     VERDICT_TEXT,
     FIXED_FAMILIES,
     // pure helpers (tests)
@@ -1074,9 +1256,18 @@ module.exports = {
     median,
     sampleSd,
     effectiveCount,
+    dayCount,
+    spanDaysOf,
+    clusteredT,
+    winsorizedMean,
+    trimmedTopMean,
+    meanLog,
+    sameSign,
     wilsonInterval,
+    clusterUnitOf,
     verdictFor,
     computeStats,
+    buildAltBenchmark,
     familyOf,
     buildScorecard,
     createBudget

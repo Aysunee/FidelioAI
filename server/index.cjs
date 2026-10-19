@@ -2313,7 +2313,7 @@ app.put('/api/engine/settings', authenticateToken, requireAdmin, async (req, res
     res.json({ settings });
 });
 
-// Per-strategy scorecard of the measured signal outcomes (any signed-in user). ?days=7 (default) or 30; each
+// Per-strategy scorecard of the measured signal outcomes (any signed-in user). ?days=7 (default), 30 or 90; each
 // process caches it for 60 s. Shape and verdict rules: server/outcomes.cjs buildScorecard / computeStats.
 app.get('/api/scorecard', authenticateToken, async (req, res) => {
     let days = outcomesLib.SCORECARD_DAYS[0];
