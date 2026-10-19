@@ -118,6 +118,10 @@ olarak paketler. Paket yoksa sunucu uyarı verir ve motor olmadan çalışmaya d
   taraması yalnızca mevcut durumu kaydeder. Yeniden başlatma aynı sinyali tekrar duyurmaz.
 - **Ayarlar:** Herkes için ortaktır; yönetici `PUT /api/engine/settings` ile değiştirir (değerler sınırlara çekilir,
   eşik değişikliği motoru sessizce yeniden başlatır, sinyal yağmuru olmaz).
+- **Momentum üst sınırı (`settings.momentum.maxChange`, varsayılan %25, en az eşik kadar, en çok %200):** 24 saatlik
+  değişimi üst sınırı aşan pariteler momentum kuralına girmez ve sayaçta sayılmaz; ileriye dönük testte (6–18 Ekim 2026)
+  %25 üstü hareketlerin 24'ünden 4'ü, %40 üstünün 7'sinden 0'ı 24 saatte kazandı. Üst sınır değişince motor eşik
+  değişikliğindeki gibi sessizce yeniden tohumlanır (sinyal yağmuru olmaz).
 - **Likidite süzgeci (`settings.universe.minMedianVolume`, varsayılan 2 000 000 USDT, 0 = kapalı):** Momentum ve hacim
   motorları yalnızca son 30 tamamlanmış günün günlük hacim medyanı (`GET /api/v3/klines?interval=1d`, günde bir, akıştaki
   her USDT paritesi için, aynı anda 4 istek) eşiğe ulaşan spot paritelere bakar; 30 günden genç pariteler hiç geçmez.

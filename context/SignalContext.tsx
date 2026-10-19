@@ -432,7 +432,8 @@ const mergeSignals = (prev: Signal[], incoming: Signal[]): Signal[] => {
 const sameStat = (a: EngineStat, b: EngineStat) => a.matching === b.matching && a.universe === b.universe;
 
 const sameSettings = (a: SignalSettings, b: SignalSettings) =>
-    a.momentum.threshold === b.momentum.threshold && a.momentum.cooldownHours === b.momentum.cooldownHours
+    a.momentum.threshold === b.momentum.threshold && a.momentum.maxChange === b.momentum.maxChange
+    && a.momentum.cooldownHours === b.momentum.cooldownHours
     && a.volume.ratio === b.volume.ratio && a.volume.cooldownHours === b.volume.cooldownHours
     && a.funding.thresholdPct === b.funding.thresholdPct && a.funding.cooldownHours === b.funding.cooldownHours
     && a.universe.minMedianVolume === b.universe.minMedianVolume;
