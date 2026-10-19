@@ -8,8 +8,15 @@
 // negative and open interest grows — while the price holds at or above the signal price. Hypothesis only:
 // there is no evidence that it predicts anything; the Karne measures it against the base BUY rules.
 //
-// The state lives in the engine's memory only: a restart or a leader change loses the armed entries and
-// the 72 h cooldowns (acceptable for a measurement that only needs a sample, not completeness).
+// Shadow_Confluence ("momentum + volume confluence", from the 6–18 Oct 2026 review of 1950 measured signals):
+// the largest 24 h winners were always moments where a Momentum_24h_Up BUY and a Volume_Spike BUY of the SAME
+// spot symbol were published minutes apart, and the hit rate was higher while the momentum size (24 h move)
+// was still small. The rule records one row when the two BUY signals land within 15 min of each other and the
+// momentum magnitude is below 15 %, with the price and time of the second signal; the symbol then rests 24 h.
+// Hypothesis only, no evidence; the Karne measures it against the base BUY rules.
+//
+// The state lives in the engine's memory only: a restart or a leader change loses the armed / pending entries
+// and the cooldowns (acceptable for a measurement that only needs a sample, not completeness).
 
 import { fundingTo8h } from './fundingSqueeze';
 
@@ -274,6 +281,146 @@ export interface ShadowStatus {
 
 export const squeezeFuelStatus = (state: SqueezeFuelState, now: number): ShadowStatus => ({
     armed: state.armed.length,
+    fired24h: state.firedAt.filter((t) => now - t < DAY_MS).length,
+    lastFiredAt: state.lastFiredAt,
+});
+
+// =============================================================================================
+// Shadow_Confluence: Momentum_24h_Up BUY + Volume_Spike BUY of the same spot symbol within 15 min
+// =============================================================================================
+
+export const STRATEGY_SHADOW_CONFLUENCE = 'Shadow_Confluence';
+
+export const CONFLUENCE_RULES = {
+    pairWindowMs: 15 * 60 * 1000,     // the two BUY signals must be published at most 15 min apart
+    momentumMaxPct: 15,               // momentum magnitude (24 h % move) strictly below this
+    cooldownMs: 24 * 60 * 60 * 1000,  // per spot symbol, after a record
+    maxPending: 300,
+} as const;
+
+type ConfluenceKind = 'momentum' | 'volume';
+
+/** The part of an emitted engine signal the confluence rule reads (magnitude only matters for momentum). */
+export interface ConfluenceTriggerInput extends SqueezeTriggerInput {
+    magnitude?: { value: number } | null;
+}
+
+/** One half of a pair, waiting for the other engine's BUY of the same spot symbol. */
+export interface ConfluencePending {
+    spot: string;
+    kind: ConfluenceKind;
+    strategy: string;
+    at: number;
+    price: number;
+    momentumPct: number | null; // magnitude.value of a momentum half, null for a volume half
+}
+
+export interface ConfluenceState {
+    pending: readonly ConfluencePending[];        // oldest first; at most one per spot symbol and kind
+    cooldowns: Readonly<Record<string, number>>;  // spot symbol -> record time
+    firedAt: readonly number[];                   // record times of the last 24 h
+    lastFiredAt: number | null;
+}
+
+export const createConfluenceState = (): ConfluenceState => ({ pending: [], cooldowns: {}, firedAt: [], lastFiredAt: null });
+
+const confluenceKindOf = (signal: ConfluenceTriggerInput): ConfluenceKind | null => {
+    if (!signal || signal.side !== 'BUY' || typeof signal.strategy !== 'string') return null;
+    if (signal.strategy === 'Momentum_24h_Up') return 'momentum';
+    if (signal.strategy.startsWith('Volume_Spike')) return 'volume';
+    return null;
+};
+
+export const isConfluenceTrigger = (signal: ConfluenceTriggerInput): boolean => confluenceKindOf(signal) !== null;
+
+const momentumPctOf = (signal: ConfluenceTriggerInput): number | null => {
+    const value = signal.magnitude && typeof signal.magnitude === 'object' ? signal.magnitude.value : undefined;
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+};
+
+/** A momentum half qualifies only with a finite 24 h move strictly below momentumMaxPct. */
+const momentumSmallEnough = (pct: number | null): boolean => pct !== null && pct < CONFLUENCE_RULES.momentumMaxPct - EPS;
+
+const pruneConfluenceCooldowns = (cooldowns: Readonly<Record<string, number>>, now: number): Record<string, number> => {
+    const next: Record<string, number> = {};
+    for (const [symbol, at] of Object.entries(cooldowns)) {
+        if (Number.isFinite(at) && now - at < CONFLUENCE_RULES.cooldownMs) next[symbol] = at;
+    }
+    return next;
+};
+
+const inConfluenceCooldown = (cooldowns: Readonly<Record<string, number>>, spot: string, now: number): boolean => {
+    const at = cooldowns[spot];
+    return typeof at === 'number' && now - at < CONFLUENCE_RULES.cooldownMs;
+};
+
+export interface ConfluenceResult {
+    state: ConfluenceState;
+    signals: ShadowSignal[]; // records to deliver through onShadowSignals (at most one per spot symbol)
+}
+
+/**
+ * Feeds the EMITTED signals of one pass to the rule. Each Momentum_24h_Up / Volume_Spike BUY either completes a
+ * pair (the other kind of the same spot symbol is pending and at most pairWindowMs older) or becomes the
+ * pending half for the next pass. A momentum half with a 24 h move of momentumMaxPct or more never pairs
+ * (it is neither recorded nor kept). A record uses the price and time of the SECOND signal, clears the symbol's
+ * pending halves and starts its cooldown. Pending halves older than the window are dropped on every call.
+ */
+export function applyConfluence(state: ConfluenceState, signals: readonly ConfluenceTriggerInput[], now: number): ConfluenceResult {
+    const R = CONFLUENCE_RULES;
+    const fresh = (entry: ConfluencePending, at: number): boolean => at - entry.at <= R.pairWindowMs && at >= entry.at;
+    let pending: ConfluencePending[] = state.pending.filter((e) => now - e.at <= R.pairWindowMs);
+    let cooldowns = pruneConfluenceCooldowns(state.cooldowns, now);
+    let firedAt = state.firedAt.filter((t) => now - t < DAY_MS);
+    let lastFiredAt = state.lastFiredAt;
+    const fired: ShadowSignal[] = [];
+    const list = Array.isArray(signals) ? signals : [];
+    for (const signal of list) {
+        const kind = confluenceKindOf(signal);
+        if (kind === null) continue;
+        const spot = signal.symbol;
+        if (typeof spot !== 'string' || !spot) continue;
+        if (!(Number.isFinite(signal.price) && signal.price > 0) || !Number.isFinite(signal.at)) continue;
+        if (inConfluenceCooldown(cooldowns, spot, now)) continue;
+        const momentumPct = kind === 'momentum' ? momentumPctOf(signal) : null;
+        if (kind === 'momentum' && !momentumSmallEnough(momentumPct)) continue;
+        const other: ConfluenceKind = kind === 'momentum' ? 'volume' : 'momentum';
+        const match = pending.find((e) => e.spot === spot && e.kind === other && fresh(e, signal.at));
+        if (match) {
+            const momentumHalf = kind === 'momentum' ? { strategy: signal.strategy, at: signal.at, pct: momentumPct as number } : { strategy: match.strategy, at: match.at, pct: match.momentumPct as number };
+            const volumeHalf = kind === 'volume' ? { strategy: signal.strategy, at: signal.at } : { strategy: match.strategy, at: match.at };
+            const gapMin = Math.round((signal.at - match.at) / 60000);
+            const note =
+                `Gölge kural (sinyal gönderilmez, yalnızca ölçülür). Aynı sembolde ${triggerLabel(momentumHalf.strategy)} ` +
+                `(${utcMinute(momentumHalf.at)}, 24s hareket ${signed(momentumHalf.pct, 1)}%, eşik %${R.momentumMaxPct} altı) ve ` +
+                `${triggerLabel(volumeHalf.strategy)} (${utcMinute(volumeHalf.at)}) ${gapMin} dk arayla çakıştı. ` +
+                `Fiyat ${plainPrice(signal.price)} (ikinci sinyalin fiyatı ve zamanı).`;
+            fired.push({
+                engine: 'SHADOW',
+                source: 'ALGO_SHADOW',
+                strategy: STRATEGY_SHADOW_CONFLUENCE,
+                symbol: spot,
+                side: 'BUY',
+                price: signal.price,
+                at: signal.at,
+                note,
+            });
+            pending = pending.filter((e) => e.spot !== spot);
+            cooldowns = { ...cooldowns, [spot]: signal.at };
+            firedAt = [...firedAt, signal.at];
+            lastFiredAt = signal.at;
+            continue;
+        }
+        // Keep the newest half per spot symbol and kind.
+        pending = pending.filter((e) => !(e.spot === spot && e.kind === kind));
+        pending.push({ spot, kind, strategy: signal.strategy, at: signal.at, price: signal.price, momentumPct });
+    }
+    if (pending.length > R.maxPending) pending = pending.slice(-R.maxPending);
+    return { state: { pending, cooldowns, firedAt, lastFiredAt }, signals: fired };
+}
+
+export const confluenceStatus = (state: ConfluenceState, now: number): ShadowStatus => ({
+    armed: state.pending.length,
     fired24h: state.firedAt.filter((t) => now - t < DAY_MS).length,
     lastFiredAt: state.lastFiredAt,
 });

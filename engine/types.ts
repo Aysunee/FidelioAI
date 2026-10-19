@@ -118,6 +118,8 @@ export interface EngineStatusSnapshot {
     };
     /** Shadow rule Shadow_SqueezeFuel (in memory; absent while the shadow rules are off). */
     shadow?: ShadowStatus;
+    /** Shadow rule Shadow_Confluence (`armed` = pending halves; absent while the shadow rules are off). */
+    shadowConfluence?: ShadowStatus;
 }
 
 export interface Engine {

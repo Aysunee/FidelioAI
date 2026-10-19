@@ -39,5 +39,5 @@ export {
     sanitizeSignalSettings,
 } from '../utils/signalEngines';
 export type { EngineCooldowns, EngineKind, EngineSignal, EngineStats, SignalSettings } from '../utils/signalEngines';
-export { SQUEEZE_FUEL_RULES, STRATEGY_SHADOW_SQUEEZE_FUEL } from '../utils/shadowRules';
+export { CONFLUENCE_RULES, SQUEEZE_FUEL_RULES, STRATEGY_SHADOW_CONFLUENCE, STRATEGY_SHADOW_SQUEEZE_FUEL } from '../utils/shadowRules';
 export type { ShadowSignal, ShadowStatus } from '../utils/shadowRules';

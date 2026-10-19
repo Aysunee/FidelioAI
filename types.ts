@@ -64,7 +64,7 @@ export interface Signal {
   // one: they report the measured size in `magnitude` instead.
   confidence?: number;
   // 'ALGO_DIVERGENCE' is the legacy source key of the funding engine. 'ALGO_SHADOW' / engine 'SHADOW'
-  // = a shadow rule (Shadow_SqueezeFuel): only measured by the outcome tracker, never in a feed.
+  // = a shadow rule (Shadow_SqueezeFuel, Shadow_Confluence): only measured by the outcome tracker, never in a feed.
   source?: 'WEBHOOK' | 'ALGO_MOMENTUM' | 'ALGO_DIVERGENCE' | 'ALGO_VOLUME' | 'ALGO_SHADOW' | 'MANUAL';
   // Which engine produced the record. Local engines always set it together with `magnitude`.
   engine?: 'MOMENTUM' | 'VOLUME' | 'FUNDING' | 'SHADOW' | 'WEBHOOK' | 'MANUAL';

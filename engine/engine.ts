@@ -25,6 +25,11 @@
 // open interest is fetched right after arming, a check every 5 min gates funding + price and fetches the
 // current open interest only when both hold. Fired events go to onShadowSignals only (never onSignals). The
 // shadow state is in memory only: a restart or a leader change loses the armed entries and the cooldowns.
+//
+// Shadow rule Shadow_Confluence (utils/shadowRules.ts, same callback): a Momentum_24h_Up BUY and a Volume_Spike
+// BUY of the same spot symbol EMITTED within 15 min of each other, with the momentum 24 h move below 15 %,
+// record one event with the second signal's price and time (24 h rest per symbol). No requests; the pending
+// halves live in memory only.
 
 import type { FuturesTicker, Ticker } from '../types';
 import {
@@ -70,13 +75,17 @@ import {
 } from './binance';
 import {
     SQUEEZE_FUEL_RULES,
+    applyConfluence,
     armSqueezeFuel,
+    confluenceStatus,
+    createConfluenceState,
     createSqueezeFuelState,
     fireSqueezeFuel,
     planSqueezeFuelCheck,
     setSqueezeBaseline,
     squeezeFundingF8,
     squeezeFuelStatus,
+    type ConfluenceState,
     type ShadowSignal,
     type SqueezeArm,
     type SqueezeFuelState,
@@ -201,6 +210,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
     // Shadow rules (measured only; see the header)
     const shadowOn = typeof options.onShadowSignals === 'function';
     let shadowState: SqueezeFuelState = createSqueezeFuelState();
+    let confluenceState: ConfluenceState = createConfluenceState();
     let shadowGen = 0;          // bumped by start / stop: answers of an earlier run are dropped
     let shadowChecking = false;
     let shadowFetchErrors = 0;
@@ -252,6 +262,19 @@ export function createEngine(options: CreateEngineOptions): Engine {
             for (const entry of result.armed) fetchBaseline(entry);
         } catch (err) {
             log.error(`[engine] Gölge kural kurulamadı: ${errorText(err)}`);
+        }
+    };
+
+    // Shadow_Confluence: pure, no requests; a pair completed by this pass is delivered right away.
+    const confluenceShadow = (signals: readonly EngineSignal[]) => {
+        if (!shadowOn) return;
+        try {
+            const result = applyConfluence(confluenceState, signals, now());
+            confluenceState = result.state;
+            for (const signal of result.signals) log.info(`[engine] Gölge kural kaydı (ölçüm için): ${signal.symbol} ${signal.strategy}`);
+            emitShadow(result.signals);
+        } catch (err) {
+            log.error(`[engine] Gölge kural (çakışma) işlenemedi: ${errorText(err)}`);
         }
     };
 
@@ -315,7 +338,10 @@ export function createEngine(options: CreateEngineOptions): Engine {
         Promise.resolve()
             .then(() => options.onSignals(signals, KIND_OF_SCAN[scan]))
             .catch((err) => log.error(`[engine] Sinyaller işlenemedi (${scan}): ${errorText(err)}`));
-        if (scan !== 'funding') armShadow(signals);
+        if (scan !== 'funding') {
+            armShadow(signals);
+            confluenceShadow(signals);
+        }
     };
 
     const liquidityOn = () => settings.universe.minMedianVolume > 0;
@@ -553,6 +579,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
         fundingState = createFundingEngineState();
         burstState = createBurstGuardState();
         shadowState = createSqueezeFuelState();
+        confluenceState = createConfluenceState();
         shadowGen++;
         stats.momentum = EMPTY_ENGINE_STAT;
         stats.volume = EMPTY_ENGINE_STAT;
@@ -597,6 +624,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
         futuresSeenAt.clear();
         futuresMarkAt = 0;
         shadowState = createSqueezeFuelState();
+        confluenceState = createConfluenceState();
         shadowGen++;
         baselineInFlight.clear();
         medians = null;
@@ -660,7 +688,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
                 young: medians ? mediansYoung : null,
                 loadedAt: liquidityLoadedAt || null,
             },
-            ...(shadowOn ? { shadow: squeezeFuelStatus(shadowState, now()) } : {}),
+            ...(shadowOn ? { shadow: squeezeFuelStatus(shadowState, now()), shadowConfluence: confluenceStatus(confluenceState, now()) } : {}),
         };
     };
 

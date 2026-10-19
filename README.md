@@ -189,5 +189,13 @@ toplu kayıtları hariç) ardından fiyatın ne yaptığı ölçülür ve strate
   Telegram'a gitmez; karnede en sonda, ayrı satırda görünür. ORCA rallisinden türetilmiş bir hipotezdir, kanıt yoktur.
   İzleme durumu yalnızca motor sürecinin belleğindedir: yeniden başlatma veya lider değişimi izlenenleri ve 72 saatlik
   beklemeleri sıfırlar.
+- **Gölge kural (`Shadow_Confluence`, "Gölge · Momentum + hacim çakışması"):** Sinyal göndermez, yalnızca ölçülür
+  (`utils/shadowRules.ts`). Aynı sembolde bir `Momentum_24h_Up` BUY ve bir `Volume_Spike` BUY sinyali birbirinden en
+  fazla 15 dk arayla yayınlanmışsa ve momentum büyüklüğü (24 saatlik yüzde hareket) %15'in altındaysa, ikinci sinyalin
+  fiyatı ve zamanıyla tek bir sonuç satırı kaydedilir; aynı sembol 24 saat yeniden kaydedilmez. Kayıt yalnızca
+  `signal_outcomes`'a (`engine` `SHADOW`, `source` `ALGO_SHADOW`, spot) yazılır; `signals` tablosuna, akışa, socket'e,
+  aktarıma veya Telegram'a gitmez; karnede en sonda GÖLGE rozetiyle görünür. 6–18 Ekim 2026 arasındaki 1950 ölçülmüş
+  sinyalde en büyük kazananların bu profile uyması üzerine kurulmuş bir hipotezdir, kanıt yoktur. Bekleyen yarılar
+  yalnızca motor belleğindedir.
 - **Silme:** Tek sinyal silmek sonuç satırını da siler (hatalı / test sinyali karneden çıkar); "tümünü sil" yalnızca
   akışı temizler, karne geçmişi korunur. Tablo oluşturulamazsa sinyaller ve API normal çalışır, karne boş kalır.
