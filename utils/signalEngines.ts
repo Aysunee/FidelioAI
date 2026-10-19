@@ -33,6 +33,12 @@ export interface SignalSettings {
     version: 2;
     momentum: {
         threshold: number;     // |24h change| in percent. default 8, min 4, max 50
+        /**
+         * Upper bound of |24h change| in percent: a move beyond it is a late-caught pump / crash, not a
+         * signal (forward test Oct 2026: 24h moves > 25% -> 4 of 24 won, > 40% -> 0 of 7). Never below
+         * threshold (sanitized). default 25, min 10, max 200 (200 = practically off).
+         */
+        maxChange: number;
         cooldownHours: number; // per symbol + direction. default 12, min 6, max 72
     };
     volume: {
@@ -59,6 +65,7 @@ export const SIGNAL_SETTINGS_VERSION = 2 as const;
 export const SIGNAL_SETTINGS_LIMITS = {
     momentum: {
         threshold: { min: 4, max: 50, default: 8 },
+        maxChange: { min: 10, max: 200, default: 25 },
         cooldownHours: { min: 6, max: 72, default: 12 },
     },
     volume: {
@@ -81,6 +88,7 @@ export const DEFAULT_SIGNAL_SETTINGS: SignalSettings = {
     version: SIGNAL_SETTINGS_VERSION,
     momentum: {
         threshold: SIGNAL_SETTINGS_LIMITS.momentum.threshold.default,
+        maxChange: SIGNAL_SETTINGS_LIMITS.momentum.maxChange.default,
         cooldownHours: SIGNAL_SETTINGS_LIMITS.momentum.cooldownHours.default,
     },
     volume: {
@@ -130,10 +138,13 @@ export function sanitizeSignalSettings(raw: unknown): SignalSettings {
     // Settings stored before the liquidity gate existed have no `universe`: they get the default (gate on).
     const uni = isRecord(raw.universe) ? raw.universe : {};
     const L = SIGNAL_SETTINGS_LIMITS;
+    const momentumThreshold = clampSetting(mom.threshold, L.momentum.threshold);
     return {
         version: SIGNAL_SETTINGS_VERSION,
         momentum: {
-            threshold: clampSetting(mom.threshold, L.momentum.threshold),
+            threshold: momentumThreshold,
+            // Settings stored before the upper bound existed have no maxChange: they get the default.
+            maxChange: Math.max(momentumThreshold, clampSetting(mom.maxChange, L.momentum.maxChange)),
             cooldownHours: clampSetting(mom.cooldownHours, L.momentum.cooldownHours),
         },
         volume: {
@@ -422,15 +433,21 @@ export type MomentumCondition = 'NONE' | 'UP' | 'DOWN';
 
 export interface MomentumState {
     seededThreshold: number | null;
+    seededMaxChange: number | null;
     lastDataAt: number;
     /** Condition of every universe symbol at the previous pass. A missing symbol has not been seen yet. */
     conditions: Record<string, MomentumCondition>;
 }
 
-export const createMomentumState = (): MomentumState => ({ seededThreshold: null, lastDataAt: 0, conditions: {} });
+export const createMomentumState = (): MomentumState => ({ seededThreshold: null, seededMaxChange: null, lastDataAt: 0, conditions: {} });
 
-export const momentumCondition = (t: Ticker, threshold: number): MomentumCondition => {
+/** |24h change| inside [threshold, maxChange]: a move beyond the upper bound is not a momentum entry. */
+export const inMomentumBand = (pct: number, threshold: number, maxChange: number): boolean =>
+    Math.abs(pct) >= threshold && Math.abs(pct) <= maxChange;
+
+export const momentumCondition = (t: Ticker, threshold: number, maxChange = Number.POSITIVE_INFINITY): MomentumCondition => {
     const pct = t.priceChangePercent;
+    if (!inMomentumBand(pct, threshold, maxChange)) return 'NONE';
     if (pct >= threshold && t.lastPrice >= t.highPrice * (1 - MOMENTUM_RULES.extremeProximity)) return 'UP';
     if (pct <= -threshold && t.lastPrice <= t.lowPrice * (1 + MOMENTUM_RULES.extremeProximity)) return 'DOWN';
     return 'NONE';
@@ -481,11 +498,14 @@ export function evaluateMomentum(
     now: number,
 ): MomentumResult {
     const threshold = settings.threshold;
+    // A changed upper bound re-seeds like a changed threshold: raising it would otherwise fire at once for
+    // every symbol that already sits between the old and the new bound.
+    const maxChange = Math.max(threshold, settings.maxChange);
     const cooldownMs = settings.cooldownHours * HOUR_MS;
     const { universe, dataAt } = selectSpotUniverse(tickers);
 
     const gap = state.lastDataAt > 0 && dataAt > 0 && Math.abs(dataAt - state.lastDataAt) > MAX_DATA_GAP_MS;
-    const reseed = state.seededThreshold !== threshold || gap;
+    const reseed = state.seededThreshold !== threshold || state.seededMaxChange !== maxChange || gap;
     const previous = reseed ? {} : state.conditions;
 
     const conditions: Record<string, MomentumCondition> = {};
@@ -493,8 +513,8 @@ export function evaluateMomentum(
     let matching = 0;
 
     for (const t of universe) {
-        if (Math.abs(t.priceChangePercent) >= threshold) matching++;
-        const condition = momentumCondition(t, threshold);
+        if (inMomentumBand(t.priceChangePercent, threshold, maxChange)) matching++;
+        const condition = momentumCondition(t, threshold, maxChange);
         const before = previous[t.symbol];
         conditions[t.symbol] = condition;
         if (before === undefined || condition === 'NONE' || condition === before) continue;
@@ -536,7 +556,7 @@ export function evaluateMomentum(
 
     return {
         signals,
-        state: { seededThreshold: threshold, lastDataAt: dataAt > 0 ? dataAt : state.lastDataAt, conditions },
+        state: { seededThreshold: threshold, seededMaxChange: maxChange, lastDataAt: dataAt > 0 ? dataAt : state.lastDataAt, conditions },
         cooldowns: nextCooldowns,
         stat: { matching, universe: universe.length },
         overflow: entries.slice(MOMENTUM_RULES.maxPerPass).map(toSignal),

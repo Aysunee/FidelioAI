@@ -63,7 +63,7 @@ type SignalsApi = ReturnType<typeof useSignals>;
 type SignalSettings = SignalsApi['signalSettings'];
 type EngineCount = SignalsApi['engineStats']['momentum'];
 
-type SettingsField = 'momThreshold' | 'momCooldown' | 'volRatio' | 'volCooldown' | 'fundingThreshold' | 'fundingCooldown' | 'liquidityMin';
+type SettingsField = 'momThreshold' | 'momMax' | 'momCooldown' | 'volRatio' | 'volCooldown' | 'fundingThreshold' | 'fundingCooldown' | 'liquidityMin';
 type SettingsDraft = Record<SettingsField, string>;
 
 // The liquidity minimum is stored in USDT and edited in million USDT.
@@ -73,6 +73,7 @@ const usdToMillions = (usd: number | undefined): string => (usd === undefined ? 
 const toDraft = (settings: SignalSettings): SettingsDraft => ({
     liquidityMin: usdToMillions(settings?.universe?.minMedianVolume),
     momThreshold: String(settings?.momentum?.threshold ?? ''),
+    momMax: String(settings?.momentum?.maxChange ?? ''),
     momCooldown: String(settings?.momentum?.cooldownHours ?? ''),
     volRatio: String(settings?.volume?.ratio ?? ''),
     volCooldown: String(settings?.volume?.cooldownHours ?? ''),
@@ -101,6 +102,7 @@ const LIQUIDITY_LIMIT_M = {
 const SETTING_RULES: Record<SettingsField, { min: number; max: number; default: number; message: string }> = {
     liquidityMin: { ...LIQUIDITY_LIMIT_M, message: `Hacim eşiği 0 (kapalı) ile ${LIQUIDITY_LIMIT_M.max} milyon USDT arasında olmalı.` },
     momThreshold: { ...LIMITS.momentum.threshold, message: `Eşik %${LIMITS.momentum.threshold.min} ile %${LIMITS.momentum.threshold.max} arasında olmalı.` },
+    momMax: { ...LIMITS.momentum.maxChange, message: `Üst sınır %${LIMITS.momentum.maxChange.min} ile %${LIMITS.momentum.maxChange.max} arasında ve eşikten küçük olmamalı.` },
     momCooldown: { ...LIMITS.momentum.cooldownHours, message: `Bekleme ${LIMITS.momentum.cooldownHours.min} ile ${LIMITS.momentum.cooldownHours.max} saat arasında olmalı.` },
     volRatio: { ...LIMITS.volume.ratio, message: `Oran ${LIMITS.volume.ratio.min} ile ${LIMITS.volume.ratio.max} kat arasında olmalı.` },
     volCooldown: { ...LIMITS.volume.cooldownHours, message: `Bekleme ${LIMITS.volume.cooldownHours.min} ile ${LIMITS.volume.cooldownHours.max} saat arasında olmalı.` },
@@ -757,6 +759,10 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
     const checked = useMemo(() => {
         const result = {} as Record<SettingsField, { value: number | null; error: string | null }>;
         SETTING_FIELDS.forEach(field => { result[field] = validateField(field, draft[field]); });
+        // The upper bound must not sit below the threshold (the engine would lift it silently).
+        if (result.momMax.error === null && result.momThreshold.value !== null && result.momMax.value !== null && result.momMax.value < result.momThreshold.value) {
+            result.momMax = { value: null, error: SETTING_RULES.momMax.message };
+        }
         return result;
     }, [draft]);
     const hasSettingsError = SETTING_FIELDS.some(field => checked[field].error !== null);
@@ -766,7 +772,7 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
         setIsSaving(true);
         const saved = await updateSignalSettings({
             version: 2,
-            momentum: { threshold: checked.momThreshold.value!, cooldownHours: checked.momCooldown.value! },
+            momentum: { threshold: checked.momThreshold.value!, maxChange: checked.momMax.value!, cooldownHours: checked.momCooldown.value! },
             volume: { ratio: checked.volRatio.value!, cooldownHours: checked.volCooldown.value! },
             funding: { thresholdPct: checked.fundingThreshold.value!, cooldownHours: checked.fundingCooldown.value! },
             universe: { minMedianVolume: Math.round(checked.liquidityMin.value! * MILLION) }
@@ -913,7 +919,9 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                             (yükselişte) ya da dipte (düşüşte), yani o uca en çok %0.1 uzaklıkta ise kayıt açılır. Kayıt, iki koşulun
                             birlikte sağlandığı ana girişte bir kez açılır. Yön, hareketin yönüdür. Evren: likidite süzgecini geçen ve
                             24 saatlik hacmi en az 1 milyon USDT olan pariteler; stabil ve wrapped coinler ile 24 saatlik aralığı
-                            %0.3'ten dar olanlar hariç. Bir taramada en çok 5 kayıt açılır (en büyük değişim önce).
+                            %0.3'ten dar olanlar hariç. Bir taramada en çok 5 kayıt açılır (en büyük değişim önce). Değişim üst sınırı
+                            aşmışsa kayıt açılmaz: geç yakalanan pompalar ve çöküşler (ileriye dönük testte %25 üstü hareketlerin 24'ünden
+                            4'ü, %40 üstünün 7'sinden 0'ı kazandı) sinyal değildir.
                         </p>
                         <div className="grid grid-cols-2 gap-3">
                             <SettingInput
@@ -933,6 +941,17 @@ export const SignalManager: React.FC<SignalManagerProps> = ({ signals, onDelete,
                                     isDraftChanged={draftDiffers('momThreshold', savedMomentum)}
                                 />
                             </SettingInput>
+                            <SettingInput
+                                id="signal-mom-max"
+                                readOnly={readOnly}
+                                label="24s değişim üst sınırı"
+                                unit="%"
+                                step="1"
+                                hint={rangeHint('momMax')}
+                                value={draft.momMax}
+                                error={checked.momMax.error}
+                                onChange={v => updateDraft('momMax', v)}
+                            />
                             <SettingInput
                                 id="signal-mom-cooldown"
                                 readOnly={readOnly}
