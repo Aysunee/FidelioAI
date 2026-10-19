@@ -187,3 +187,95 @@ test('neutral stats carry the new fields as null', () => {
     assert.equal(stats.outlierDependent, false);
     assert.deepEqual(stats.costSensitivity.map(c => c.meanNet), [null, null, null]);
 });
+
+// ---- registration of TradingView webhook signals (no DB, no network: fake pool + fake fetch) ----
+
+const EXCHANGE_INFO = JSON.stringify({ symbols: [{ symbol: 'BTCUSDT', status: 'TRADING' }, { symbol: 'ETHUSDT', status: 'TRADING' }] });
+const fakeFetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => JSON.parse(EXCHANGE_INFO) });
+
+// A fake mysql2 pool: records every query; `signals` rows are served to the backfill SELECT with the same
+// string comparison MySQL applies to the VARCHAR `time` column; inserts land in `outcomes`.
+const fakeDb = (signals = []) => {
+    const db = { queries: [], outcomes: [] };
+    db.query = async (sql, params = []) => {
+        db.queries.push({ sql, params });
+        if (sql.startsWith('INSERT INTO signal_outcomes')) {
+            if (db.outcomes.some(r => r.signalId === params[0])) { const e = new Error('dup'); e.code = 'ER_DUP_ENTRY'; throw e; }
+            db.outcomes.push({ signalId: params[0], symbol: params[1], market: params[2], side: params[3], strategy: params[4], engine: params[5], source: params[6], t0: params[7], p0: params[8], status: params[10] });
+            return [{ affectedRows: 1 }];
+        }
+        if (sql.startsWith('SELECT id, strategy, symbol')) {
+            const [from, limit] = params;
+            return [signals.filter(s => s.time >= from).sort((a, b) => (a.time < b.time ? 1 : -1)).slice(0, limit)];
+        }
+        if (sql.startsWith('SELECT signal_id FROM signal_outcomes WHERE signal_id IN')) {
+            return [db.outcomes.filter(r => params.includes(r.signalId)).map(r => ({ signal_id: r.signalId }))];
+        }
+        return [[]];
+    };
+    return db;
+};
+
+const tracker = (db, extra = {}) => o.createOutcomeTracker({
+    db, fetch: fakeFetch, now: () => T0, isLeader: () => true, hasTimeMs: async () => false,
+    log: { info() {}, warn() {} }, ...extra
+});
+
+test('buildRegistration: a TradingView webhook symbol (BINANCE:BTCUSDT.P) is a pending perp row with engine null', () => {
+    const d = o.buildRegistration({ id: 'w1', strategy: 'External_Webhook', symbol: 'BINANCE:BTCUSDT.P', side: 'BUY', price: 50000, source: 'WEBHOOK', timeMs: T0 });
+    assert.equal(d.status, 'pending');
+    assert.equal(d.symbol, 'BTCUSDT');
+    assert.equal(d.market, 'perp');
+    assert.equal(d.engine, null);
+    assert.equal(d.source, 'WEBHOOK');
+    assert.equal(d.t0, T0);
+    const spot = o.buildRegistration({ id: 'w2', strategy: 'External_Webhook', symbol: 'ETHUSDT', side: 'SELL', price: 3000, source: 'WEBHOOK', time: new Date(T0).toISOString() });
+    assert.equal(spot.status, 'pending');
+    assert.equal(spot.market, 'spot');
+    assert.equal(spot.t0, T0); // no time_ms column: the ISO `time` string is parsed
+});
+
+test('register: the webhook publish path opens a signal_outcomes row (source WEBHOOK, engine NULL)', async () => {
+    const db = fakeDb();
+    const t = tracker(db);
+    t.setTable(true);
+    const signal = { id: 'wh-1', strategy: 'External_Webhook', symbol: 'BINANCE:BTCUSDT.P', side: 'BUY', price: 50000, time: new Date(T0).toISOString(), note: 'Received via Webhook', source: 'WEBHOOK', confidence: 0.95 };
+    const draft = await t.register({ ...signal, timeMs: T0 });
+    assert.ok(draft, 'row inserted');
+    assert.equal(db.outcomes.length, 1);
+    assert.deepEqual({ ...db.outcomes[0] }, { signalId: 'wh-1', symbol: 'BTCUSDT', market: 'perp', side: 'BUY', strategy: 'External_Webhook', engine: null, source: 'WEBHOOK', t0: T0, p0: 50000, status: 'pending' });
+    assert.equal(await t.register({ ...signal, timeMs: T0 }), null); // idempotent
+});
+
+test('backfill without signals.time_ms: ISO string window of 7 days; signals older than that are never registered', async () => {
+    const iso = (ms) => new Date(ms).toISOString();
+    const row = (id, ms, source = 'WEBHOOK') => ({ id, strategy: 'External_Webhook', symbol: 'BINANCE:ETHUSDT.P', side: 'BUY', price: 3000, time: iso(ms), source });
+    const db = fakeDb([row('burst', T0 - 7 * DAY_MS - HOUR_MS), row('recent', T0 - DAY_MS, 'ALGO_MOMENTUM')]);
+    const result = await tracker(db).backfill();
+    const select = db.queries.find(q => q.sql.startsWith('SELECT id, strategy, symbol'));
+    assert.match(select.sql, /WHERE time >= \?/);
+    assert.doesNotMatch(select.sql, /time_ms/);
+    assert.equal(select.params[0], iso(T0 - 7 * DAY_MS));
+    assert.equal(select.params[1], 5000);
+    assert.deepEqual(result, { at: T0, scanned: 1, inserted: 1 });
+    assert.deepEqual(db.outcomes.map(r => r.signalId), ['recent']);
+});
+
+test('backfill: OUTCOMES_BACKFILL_DAYS / _MAX_ROWS widen the window (deps override the env)', async () => {
+    const iso = (ms) => new Date(ms).toISOString();
+    const row = (id, ms) => ({ id, strategy: 'External_Webhook', symbol: 'ETHUSDT', side: 'BUY', price: 3000, time: iso(ms), source: 'WEBHOOK' });
+    const db = fakeDb([row('burst', T0 - 7 * DAY_MS - HOUR_MS), row('recent', T0 - DAY_MS)]);
+    const result = await tracker(db, { backfillDays: 30, backfillMaxRows: 1 }).backfill();
+    const select = db.queries.find(q => q.sql.startsWith('SELECT id, strategy, symbol'));
+    assert.equal(select.params[0], iso(T0 - 30 * DAY_MS));
+    assert.equal(select.params[1], 1);
+    assert.deepEqual(result, { at: T0, scanned: 1, inserted: 1 });
+    assert.deepEqual(db.outcomes.map(r => r.signalId), ['recent']); // newest first under the row cap
+});
+
+test('parseBackfillConfig: defaults 7 days / 5000 rows, env integers within bounds, garbage ignored', () => {
+    assert.deepEqual(o.parseBackfillConfig({}), { days: 7, maxRows: 5000 });
+    assert.deepEqual(o.parseBackfillConfig({ OUTCOMES_BACKFILL_DAYS: '30', OUTCOMES_BACKFILL_MAX_ROWS: '20000' }), { days: 30, maxRows: 20000 });
+    assert.deepEqual(o.parseBackfillConfig({ OUTCOMES_BACKFILL_DAYS: '0', OUTCOMES_BACKFILL_MAX_ROWS: 'çok' }), { days: 7, maxRows: 5000 });
+    assert.deepEqual(o.parseBackfillConfig({ OUTCOMES_BACKFILL_DAYS: '400', OUTCOMES_BACKFILL_MAX_ROWS: '999999' }), { days: 90, maxRows: 50000 });
+});

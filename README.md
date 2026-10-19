@@ -48,6 +48,14 @@ node server/migrate-alerts-portfolio.cjs --yes   # mevcut veritabanları için e
 node server/import_users.cjs --yes               # (tek seferlik) server/users_db.json içindeki kullanıcıları içe aktarır
 ```
 
+> **Canlı (Hostinger) veritabanı notu, 19 Ekim 2026:** canlı `signals` tablosunda `time_ms` sütunu ve
+> `idx_signals_time` / `idx_signals_time_ms` indeksleri yok; `server/migrate-alerts-portfolio.cjs` canlıda hiç
+> çalıştırılmamış görünüyor. Sunucu bunsuz da çalışır (sıralama ve sonuç takibi backfill'i ISO-8601 `time` metnine
+> düşer) ama her `GET /api/signals` ve backfill sorgusu tabloyu baştan sona tarar. Bakım penceresinde bir kez
+> `node server/migrate-alerts-portfolio.cjs --yes` çalıştırın (idempotent; mevcut satırların `time_ms` değerini
+> `time`'dan doldurur). Durumu önce şu sorguyla doğrulayın:
+> `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'signals' AND COLUMN_NAME = 'time_ms'`.
+
 ## Geliştirme
 
 Frontend ve backend ayrı süreçlerdir:
@@ -156,7 +164,13 @@ toplu kayıtları hariç) ardından fiyatın ne yaptığı ölçülür ve strate
   (MFE / MAE). Yönsüz (`NEUTRAL`) sinyallerde yalnızca hareket büyüklüğü vardır. Ölçülen ufuk lider sürece bağlı
   tarayıcılara `signal_outcome` olayıyla gider; diğerleri sonraki `GET /api/signals` ile alır (her sinyalde `outcome`).
 - **Başlangıç:** Lider süreç açıldığında bir kez son 7 günün sonuç satırı olmayan sinyallerini ekler (en fazla 5000,
-  en yenilerden başlayarak; tekrar çalıştırmak çift kayıt üretmez); böylece karne gerçek veriyle başlar.
+  en yenilerden başlayarak; tekrar çalıştırmak çift kayıt üretmez); böylece karne gerçek veriyle başlar. Pencere
+  `OUTCOMES_BACKFILL_DAYS` (1-90) ve `OUTCOMES_BACKFILL_MAX_ROWS` (100-50000) ile tek bir başlatma için
+  genişletilebilir. Takip canlıya girmeden önce kaydedilmiş sinyaller yalnızca bu pencerenin içindeyse satır alır:
+  2 Ekim 2026 15:48-17:17 UTC arasındaki 2956 TradingView webhook sinyali, takibin ilk çalıştığı 9 Ekim'deki 7 günlük
+  pencerenin dışında (patlama pencere başlangıcından en az bir saat önce bitti) kaldığı için hiç ölçülmedi (webhook kayıt yolu ve `BINANCE:BTCUSDT.P` gibi
+  sembollerin ayrıştırılması doğru; `server/outcomes.test.cjs`). O sinyalleri de karneye almak için sunucuyu bir kez
+  `OUTCOMES_BACKFILL_DAYS=30 OUTCOMES_BACKFILL_MAX_ROWS=20000` ile başlatın; sonra değişkenleri kaldırın.
 - **Karne:** `GET /api/scorecard?days=7|30|90` (giriş yapmış her kullanıcı, süreç başına 60 sn önbellek) strateji
   ailesi x ufuk başına şunları verir (`reports/Kripto sinyal kuralları kurumsal yaklaşımlar.md`, "Gölge kurallar için
   doğrulama protokolü" bölümüne göre):
