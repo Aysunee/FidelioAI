@@ -54,6 +54,8 @@ export interface EngineTiming {
     metaRetryMs: number;     // retry after a failed REST load
     settledTtlMs: number;    // latest settled funding rates refresh
     pruneMs: number;         // memory hygiene for symbols that disappeared
+    liquidityTtlMs: number;  // 30-day median daily volumes (liquidity gate) refresh
+    liquidityRetryMs: number;// retry after a failed / rate-limited liquidity load
     autoScan: boolean;       // false: no pass timers (tests call scanNow)
 }
 
@@ -99,6 +101,20 @@ export interface EngineStatusSnapshot {
         settledFunding: number | null;
         metaLoadedAt: number | null;
         settledLoadedAt: number | null;
+    };
+    /**
+     * Liquidity gate of the momentum / volume engines (settings.universe.minMedianVolume). `symbols` = pairs
+     * that pass the current minimum, `known` = pairs with a 30-day median, `young` = pairs with fewer than
+     * 30 completed days; all null until the first load. While `enabled` and `loadedAt` is null the two engines
+     * do not scan.
+     */
+    liquidity: {
+        enabled: boolean;
+        minMedianVolume: number;
+        symbols: number | null;
+        known: number | null;
+        young: number | null;
+        loadedAt: number | null;
     };
     /** Shadow rule Shadow_SqueezeFuel (in memory; absent while the shadow rules are off). */
     shadow?: ShadowStatus;

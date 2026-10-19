@@ -118,12 +118,22 @@ olarak paketler. Paket yoksa sunucu uyarı verir ve motor olmadan çalışmaya d
   taraması yalnızca mevcut durumu kaydeder. Yeniden başlatma aynı sinyali tekrar duyurmaz.
 - **Ayarlar:** Herkes için ortaktır; yönetici `PUT /api/engine/settings` ile değiştirir (değerler sınırlara çekilir,
   eşik değişikliği motoru sessizce yeniden başlatır, sinyal yağmuru olmaz).
+- **Likidite süzgeci (`settings.universe.minMedianVolume`, varsayılan 2 000 000 USDT, 0 = kapalı):** Momentum ve hacim
+  motorları yalnızca son 30 tamamlanmış günün günlük hacim medyanı (`GET /api/v3/klines?interval=1d`, günde bir, akıştaki
+  her USDT paritesi için, aynı anda 4 istek) eşiğe ulaşan spot paritelere bakar; 30 günden genç pariteler hiç geçmez.
+  İlk yükleme bitene kadar iki motor taramaz (yeniden başlatma süzgeçsiz evrende sinyal üretemez); yükleme Binance
+  istek sınırına takılır veya isteklerin %20'sinden fazlası başarısız olursa eski liste kalır ve 2 dk sonra yeniden
+  denenir. Fonlama motoru vadeli evrende çalışır, süzgeçten etkilenmez. Gerekçe: 12 günlük ileriye dönük test ve
+  literatür (Fičura 2023, Bianchi ve diğerleri 2022), küçük / az işlem gören coinlerde 24 saatlik hareketlerin ortalama
+  geri döndüğünü gösteriyor; belgelenmiş momentum yalnızca likit evrende var (bkz. `reports/`). Medyanlar yalnızca
+  motor belleğindedir. Durum: `GET /api/engine/status` içinde `liquidity` (`enabled`, `minMedianVolume`, geçen /
+  ölçülen / genç parite sayısı, `loadedAt`); motor çalışmıyorsa `null`.
 - **Durum:** `GET /api/engine/status` (giriş yapmış her kullanıcı): `mode`, `running`, `role` (`leader` / `standby` / `off`),
   `startedAt`, `uptimeSec` (süreç çalışma süresi), `processStartedAt`, `boots` (son 50 başlangıç zamanı), dört akışın
   durumu (`spotMini`, `spotHour`, `futuresMark`, `futuresMini`: `connected` / `connecting` / `down`), motor başına son
   tarama zamanı (`lastScan`), eşiği aşan sembol / evren sayıları (`stats`), geçerli ayarlar, negatif fonlama kapısındaki
-  kontratlar (`activeFunding`, `f8` kesir olarak), `telegram.server` ve bugün (00:00 UTC'den beri) üretilen motor sinyali
-  sayısı (`signalsToday`). Hosting'in süreci ayakta tutup tutmadığı `boots` ve `uptimeSec` ile izlenir; her başlangıç
+  kontratlar (`activeFunding`, `f8` kesir olarak), likidite süzgecinin durumu (`liquidity`), `telegram.server` ve bugün
+  (00:00 UTC'den beri) üretilen motor sinyali sayısı (`signalsToday`). Hosting'in süreci ayakta tutup tutmadığı `boots` ve `uptimeSec` ile izlenir; her başlangıç
   ayrıca `[engine] Süreç başlangıcı kaydedildi` satırıyla loglanır.
 
 ## Sinyal karnesi

@@ -434,7 +434,8 @@ const sameStat = (a: EngineStat, b: EngineStat) => a.matching === b.matching && 
 const sameSettings = (a: SignalSettings, b: SignalSettings) =>
     a.momentum.threshold === b.momentum.threshold && a.momentum.cooldownHours === b.momentum.cooldownHours
     && a.volume.ratio === b.volume.ratio && a.volume.cooldownHours === b.volume.cooldownHours
-    && a.funding.thresholdPct === b.funding.thresholdPct && a.funding.cooldownHours === b.funding.cooldownHours;
+    && a.funding.thresholdPct === b.funding.thresholdPct && a.funding.cooldownHours === b.funding.cooldownHours
+    && a.universe.minMedianVolume === b.universe.minMedianVolume;
 
 const sameActiveFunding = (a: FundingRegimeEntry[], b: FundingRegimeEntry[]) =>
     a.length === b.length && a.every((entry, i) =>

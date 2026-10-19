@@ -38,6 +38,8 @@ export const EXCHANGE_INFO_URL = `${FAPI_BASE}/fapi/v1/exchangeInfo`;
 export const FUNDING_INFO_URL = `${FAPI_BASE}/fapi/v1/fundingInfo`;
 export const FUNDING_RATE_URL = `${FAPI_BASE}/fapi/v1/fundingRate`;
 export const OPEN_INTEREST_URL = `${FAPI_BASE}/fapi/v1/openInterest`;
+export const SPOT_API_BASE = 'https://api.binance.com';
+export const SPOT_KLINES_URL = `${SPOT_API_BASE}/api/v3/klines`;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 /** Raw array (`/ws/...`) or combined-stream envelope (`/stream?streams=...` → { stream, data }). */
@@ -277,4 +279,75 @@ export function settledExpiry(now: number, complete: boolean, ttlMs: number): nu
     const published = hour + SETTLE_PUBLISH_GRACE_MS;
     const nextLook = now < published ? published : hour + HOUR_MS + SETTLE_PUBLISH_GRACE_MS;
     return Math.min(now + ttlMs, nextLook);
+}
+
+// --- Liquidity gate: median daily quote volume ------------------------------------------------
+// GET /api/v3/klines?interval=1d (weight 2) per symbol, once a day for every USDT pair the engine sees.
+// Binance's spot limit is 6000 weight per minute; ~500 pairs cost ~1000, fetched a few at a time.
+
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * Median quote volume (kline field 7) of the last `days` COMPLETED daily candles, given the raw answer of
+ * `/api/v3/klines?interval=1d&limit=days+1` fetched at `now`. The candle still open at `now` is left out.
+ * null when fewer than `days` completed candles exist (a pair younger than `days` days) or the answer is
+ * malformed.
+ */
+export function parseMedianDailyQuoteVolume(body: unknown, days: number, now: number): number | null {
+    if (!Array.isArray(body) || !(days > 0)) return null;
+    const volumes: number[] = [];
+    for (const k of body) {
+        if (!Array.isArray(k)) continue;
+        const openTime = Number(k[0]);
+        const closeTime = Number(k[6]);
+        const quote = typeof k[7] === 'number' ? k[7] : typeof k[7] === 'string' ? parseFloat(k[7]) : NaN;
+        if (!Number.isFinite(openTime) || !Number.isFinite(closeTime) || !Number.isFinite(quote) || quote < 0) continue;
+        if (closeTime >= now) continue; // still open
+        if (now - openTime > (days + 2) * DAY_MS) continue; // outside the window (defensive)
+        volumes.push(quote);
+    }
+    if (volumes.length < days) return null;
+    const window = volumes.slice(-days).sort((a, b) => a - b);
+    const mid = window.length >> 1;
+    return window.length % 2 === 1 ? window[mid] : (window[mid - 1] + window[mid]) / 2;
+}
+
+export interface MedianVolumeLoad {
+    medians: Map<string, number>; // symbols with `days` completed candles
+    young: number;                // answered, but fewer than `days` completed candles
+    failed: number;               // request failed (left out of the map)
+    aborted: boolean;             // stopped early on a rate-limit answer (HTTP 429 / 418)
+}
+
+const isRateLimited = (err: unknown): boolean => err instanceof Error && /HTTP (429|418)/.test(err.message);
+
+/**
+ * Median daily quote volume of every symbol (see parseMedianDailyQuoteVolume), `concurrency` requests at a
+ * time. A rate-limit answer stops the load at once (aborted = true; the partial map is still returned).
+ */
+export async function loadMedianDailyVolumes(
+    fetchImpl: FetchLike,
+    symbols: readonly string[],
+    days: number,
+    now: () => number,
+    concurrency = 4,
+): Promise<MedianVolumeLoad> {
+    const result: MedianVolumeLoad = { medians: new Map(), young: 0, failed: 0, aborted: false };
+    const queue = symbols.slice();
+    const worker = async () => {
+        while (queue.length > 0 && !result.aborted) {
+            const symbol = queue.shift() as string;
+            try {
+                const body = await getJson(fetchImpl, `${SPOT_KLINES_URL}?symbol=${encodeURIComponent(symbol)}&interval=1d&limit=${days + 1}`);
+                const median = parseMedianDailyQuoteVolume(body, days, now());
+                if (median === null) result.young++;
+                else result.medians.set(symbol, median);
+            } catch (err) {
+                if (isRateLimited(err)) result.aborted = true;
+                result.failed++;
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, symbols.length)) }, worker));
+    return result;
 }
