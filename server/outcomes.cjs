@@ -47,8 +47,26 @@ const SYMBOLS_TTL_MS = HOUR_MS;            // exchangeInfo symbol sets
 const SYMBOLS_RETRY_MS = 5 * MIN_MS;
 const BTC_CACHE_MAX = 300;
 const BTC_CACHE_TTL_MS = 15 * MIN_MS;
+// Backfill window of the leader's first pass (signals of the last N days without a row, newest first, at most
+// MAX_ROWS). Env OUTCOMES_BACKFILL_DAYS (1-90) / OUTCOMES_BACKFILL_MAX_ROWS (100-50000) widen it for one start:
+// signals stored before the tracking went live only get a row while they are inside this window (the
+// TradingView burst of 2 Oct 2026 15:48-17:17 UTC ended before the 7-day window of the first pass, which ran after
+// the tracking reached main on 9 Oct 18:20 UTC, so it was never measured).
 const BACKFILL_DAYS = 7;
 const BACKFILL_MAX_ROWS = 5000;
+const BACKFILL_DAYS_MAX = 90;
+const BACKFILL_MAX_ROWS_MAX = 50000;
+const parseBackfillConfig = (env) => {
+    const int = (value, min, max, fallback) => {
+        const n = typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN;
+        return Number.isFinite(n) && n >= min ? Math.min(n, max) : fallback;
+    };
+    const e = env || {};
+    return {
+        days: int(e.OUTCOMES_BACKFILL_DAYS, 1, BACKFILL_DAYS_MAX, BACKFILL_DAYS),
+        maxRows: int(e.OUTCOMES_BACKFILL_MAX_ROWS, 100, BACKFILL_MAX_ROWS_MAX, BACKFILL_MAX_ROWS)
+    };
+};
 const SCORECARD_CACHE_MS = 60 * 1000;
 const SCORECARD_DAYS = Object.freeze([7, 30, 90]);
 const SCORECARD_MAX_ROWS = 50000;
@@ -696,6 +714,7 @@ class OutcomeError extends Error {
  *  hasTimeMs  async () => boolean: signals.time_ms exists (backfill)
  *  emit       (event, payload) => void: socket.io broadcast to this process's clients
  *  log        { info, warn }
+ *  backfillDays, backfillMaxRows  optional: the backfill window (default: OUTCOMES_BACKFILL_DAYS / _MAX_ROWS env, else 7 / 5000)
  */
 const createOutcomeTracker = (deps) => {
     const db = deps.db;
@@ -705,6 +724,9 @@ const createOutcomeTracker = (deps) => {
     const isLeader = typeof deps.isLeader === 'function' ? deps.isLeader : () => false;
     const emit = typeof deps.emit === 'function' ? deps.emit : () => {};
     const hasTimeMs = typeof deps.hasTimeMs === 'function' ? deps.hasTimeMs : async () => true;
+    const envBackfill = parseBackfillConfig(process.env);
+    const backfillDays = Number.isFinite(deps.backfillDays) && deps.backfillDays >= 1 ? Math.min(deps.backfillDays, BACKFILL_DAYS_MAX) : envBackfill.days;
+    const backfillMaxRows = Number.isFinite(deps.backfillMaxRows) && deps.backfillMaxRows >= 1 ? Math.min(deps.backfillMaxRows, BACKFILL_MAX_ROWS_MAX) : envBackfill.maxRows;
 
     const state = {
         table: null,            // signal_outcomes usable: true / false / null (not checked yet)
@@ -1024,14 +1046,16 @@ const createOutcomeTracker = (deps) => {
     // Engine / webhook / manual signals of the last 7 days without an outcome row get one (idempotent).
     const backfill = async () => {
         const t = now();
-        const from = t - BACKFILL_DAYS * DAY_MS;
+        const from = t - backfillDays * DAY_MS;
         const useTimeMs = await hasTimeMs();
-        // Newest first: with more than BACKFILL_MAX_ROWS signals in the window the most recent ones get a row.
+        // Newest first: with more than backfillMaxRows signals in the window the most recent ones get a row.
+        // Without signals.time_ms the VARCHAR `time` (server-generated ISO-8601, UTC) is compared as a string
+        // against an ISO string, which orders correctly.
         const [rows] = await db.query(
             useTimeMs
                 ? 'SELECT id, strategy, symbol, side, price, time, time_ms, source FROM signals WHERE time_ms >= ? ORDER BY time_ms DESC LIMIT ?'
                 : 'SELECT id, strategy, symbol, side, price, time, source FROM signals WHERE time >= ? ORDER BY time DESC LIMIT ?',
-            [useTimeMs ? from : new Date(from).toISOString(), BACKFILL_MAX_ROWS]
+            [useTimeMs ? from : new Date(from).toISOString(), backfillMaxRows]
         );
         const candidates = (Array.isArray(rows) ? rows : [])
             .filter(r => r && r.id !== null && r.id !== undefined && String(r.symbol || '').toUpperCase() !== MARKET_SYMBOL);
@@ -1067,8 +1091,9 @@ const createOutcomeTracker = (deps) => {
         }
         state.backfillDone = true;
         state.backfill = { at: t, scanned: candidates.length, inserted };
-        if (inserted > 0 || candidates.length >= BACKFILL_MAX_ROWS) {
-            log.info(`[outcomes] Geriye dönük kayıt: son ${BACKFILL_DAYS} günün ${candidates.length} sinyalinden ${inserted} tanesine sonuç kaydı açıldı.`);
+        if (inserted > 0 || candidates.length >= backfillMaxRows) {
+            log.info(`[outcomes] Geriye dönük kayıt: son ${backfillDays} günün ${candidates.length} sinyalinden ${inserted} tanesine sonuç kaydı açıldı`
+                + (candidates.length >= backfillMaxRows ? ` (üst sınır ${backfillMaxRows} satıra ulaşıldı; daha eski sinyaller için OUTCOMES_BACKFILL_MAX_ROWS).` : '.'));
         }
         return state.backfill;
     };
@@ -1231,6 +1256,8 @@ module.exports = {
     MAX_ATTEMPTS,
     REQUEST_BUDGET,
     BACKFILL_DAYS,
+    BACKFILL_MAX_ROWS,
+    parseBackfillConfig,
     SCORECARD_CACHE_MS,
     SCORECARD_DAYS,
     P0_MAX_RATIO,
